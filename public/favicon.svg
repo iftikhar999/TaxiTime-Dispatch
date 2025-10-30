@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#0f172a"/>
+  <path d="M12 40h40l-4-10H16l-4 10zm8 4a4 4 0 110-8 4 4 0 010 8zm24 0a4 4 0 110-8 4 4 0 010 8z" fill="#f59e0b"/>
+  <text x="32" y="26" text-anchor="middle" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e2e8f0">Dispatch</text>
+</svg>

@@ -7,22 +7,19 @@ import {
 import { loadStripe } from "@stripe/stripe-js";
 import {
     Accessibility,
-    ArrowLeftRight,
     Briefcase,
     Car,
-    ChevronDown,
     CreditCard,
     DollarSign,
     Mail,
     MapPin,
     Phone,
-    Search,
     User,
-    Users,
-    X,
+    Users
 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
+import { useTheme } from "../../contexts/ThemeContext";
 import { useDispatchController } from "../../hooks/useDispatchController";
 import {
     searchCustomers,
@@ -49,6 +46,7 @@ import {
     type ZoneTariff,
 } from "../../services/zoneService";
 import { useDispatchStore } from "../../store/useDispatchStore";
+import { isAssignableJobStatus } from "../../utils/jobStatusHelpers";
 
 const GOOGLE_MAPS_API_KEY =
   import.meta.env.VITE_GOOGLE_MAPS_API_KEY ||
@@ -82,8 +80,17 @@ interface JobFormState {
   dropoffAddress: string;
   dropoffLat?: number;
   dropoffLng?: number;
+  
+  // Intermediate stops/waypoints
+  stops: Array<{
+    address: string;
+    latitude?: number;
+    longitude?: number;
+    order: number;
+  }>;
 
-  // Tariff & Pricing
+  // Vehicle & Tariff
+  vehicleType: string;
   tariffId: string;
   estimatedDistance?: number;
   estimatedFare?: number;
@@ -125,6 +132,7 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
   onJobUpdated,
   stripeConfig,
 }) => {
+  const { isDark } = useTheme();
   const stripe = useStripe();
   const elements = useElements();
   const tariffs = useDispatchStore((state) => state.tariffs);
@@ -198,6 +206,8 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
     email: "",
     pickupAddress: "",
     dropoffAddress: "",
+    stops: [], // Initialize empty stops array
+    vehicleType: "",
     tariffId: "",
     scheduledFor: "now",
     notes: "",
@@ -264,7 +274,7 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
       if (editJobData.assignedDriverId || editJobData.driverId) {
         driverAssignment = "manual";
         selectedDriverId = editJobData.assignedDriverId || editJobData.driverId;
-      } else if (editJobData.status === "UNASSIGNED") {
+      } else if (isAssignableJobStatus(editJobData.status)) {
         driverAssignment = "unassigned";
       }
       
@@ -340,10 +350,12 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
         email,
         pickupAddress: editJobData.pickupAddress || "",
         dropoffAddress: editJobData.dropoffAddress || "",
+        stops: editJobData.stops || editJobData.requirements?.stops || [], // Load existing stops
         pickupLat: editJobData.pickupLocation?.latitude || editJobData.pickupLat || editJobData.pickupLatitude,
         pickupLng: editJobData.pickupLocation?.longitude || editJobData.pickupLng || editJobData.pickupLongitude,
         dropoffLat: editJobData.dropoffLocation?.latitude || editJobData.dropoffLat || editJobData.dropoffLatitude,
         dropoffLng: editJobData.dropoffLocation?.longitude || editJobData.dropoffLng || editJobData.dropoffLongitude,
+        vehicleType: editJobData.vehicleType || editJobData.requirements?.vehicleType || "",
         tariffId: editJobData.requirements?.tariffId || editJobData.tariffId || editJobData.tariff?.id || "",
         scheduledFor,
         scheduledDate,
@@ -468,6 +480,10 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
   const [dropoffSuggestions, setDropoffSuggestions] = useState<
     LocationSuggestion[]
   >([]);
+  
+  // Stop autocomplete state
+  const [stopSuggestions, setStopSuggestions] = useState<Record<number, LocationSuggestion[]>>({});
+  const [activeStopIndex, setActiveStopIndex] = useState<number | null>(null);
 
   // Selected tariff details
   const [selectedTariff, setSelectedTariff] = useState<any>(null);
@@ -628,6 +644,27 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
     }
   }, [isEditMode, editJobData, tariffs, form.tariffId, isInitializingEdit]);
 
+  // Auto-select first vehicle type and tariff as defaults (for new jobs only)
+  useEffect(() => {
+    if (!isEditMode && !isInitializingEdit) {
+      // Set default vehicle type if not set
+      if (!form.vehicleType) {
+        setForm(prev => ({ ...prev, vehicleType: "SEDAN" }));
+      }
+      
+      // Set default tariff if not set and tariffs are available
+      if (!form.tariffId && tariffs.length > 0) {
+        const defaultTariff = tariffs[0];
+        const tariffId = defaultTariff.id || defaultTariff.identifier || "";
+        if (tariffId) {
+          setForm(prev => ({ ...prev, tariffId }));
+          setSelectedTariff(defaultTariff);
+          console.log("[JobComposer] Auto-selected first tariff as default:", defaultTariff);
+        }
+      }
+    }
+  }, [isEditMode, isInitializingEdit, tariffs, form.vehicleType, form.tariffId]);
+
   const handleChange = (field: keyof JobFormState, value: any) => {
     console.log(`[JobComposer] handleChange: ${field} = ${value}`);
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -767,6 +804,51 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
     }
   };
 
+  // Stop Autocomplete Search
+  const handleStopSearch = async (query: string, index: number) => {
+    // Update the stop address in form
+    const newStops = [...form.stops];
+    newStops[index] = { ...newStops[index], address: query };
+    handleChange('stops', newStops);
+    setActiveStopIndex(index);
+
+    if (query.length < 3) {
+      setStopSuggestions(prev => ({ ...prev, [index]: [] }));
+      return;
+    }
+
+    try {
+      const suggestions = await getLocationSuggestions(query, placeProvider, {
+        language: "en",
+      });
+      setStopSuggestions(prev => ({ ...prev, [index]: suggestions }));
+    } catch (error) {
+      console.error("Stop autocomplete failed:", error);
+      setStopSuggestions(prev => ({ ...prev, [index]: [] }));
+    }
+  };
+
+  // Select Stop Location from Suggestions
+  const selectStopLocation = async (location: LocationSuggestion, index: number) => {
+    try {
+      const details = await getPlaceDetails(location, placeProvider);
+      const newStops = [...form.stops];
+      newStops[index] = {
+        ...newStops[index],
+        address: details.formattedAddress ?? details.address,
+        latitude: details.lat,
+        longitude: details.lng,
+      };
+      handleChange('stops', newStops);
+      setStopSuggestions(prev => ({ ...prev, [index]: [] }));
+      setActiveStopIndex(null);
+      toast.success(`Stop ${index + 1} set`);
+    } catch (error) {
+      console.error("Failed to get stop place details:", error);
+      toast.error("Failed to set stop location");
+    }
+  };
+
   // Detect Zone for Pickup Location
   const detectPickupZone = async (lat: number, lng: number) => {
     try {
@@ -850,18 +932,20 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
       // Use actual tariff values from the selected tariff
       const baseFare = tariff.baseFare || 5.0;
       const perKm = tariff.perKm || 2.5;
-      const perMinute = tariff.perMinute || 0.5;
+      // perMinute is for waiting time, NOT trip duration
+      // Waiting fare is only calculated during the actual ride when driver waits
+      // For estimates, we don't include waiting fare
 
       const distanceFare = distance * perKm;
-      const waitingFare = duration * perMinute;
-      const totalFare = baseFare + distanceFare + waitingFare;
+      // No waiting fare in estimates - it's calculated during the actual ride
+      const totalFare = baseFare + distanceFare;
 
       setForm((prev) => ({
         ...prev,
         estimatedDistance: distance,
         baseFare,
         distanceFare,
-        waitingFare,
+        waitingFare: 0, // No waiting fare in estimates
         estimatedFare: totalFare,
         currency: tariff.currency || prev.currency || "USD",
       }));
@@ -994,6 +1078,8 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
       email: "",
       pickupAddress: "",
       dropoffAddress: "",
+      stops: [], // Clear stops
+      vehicleType: "",
       tariffId: "",
       scheduledFor: "now",
       notes: "",
@@ -1020,40 +1106,24 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
 
-    // Validation
-    if (!form.pickupAddress || !form.dropoffAddress) {
-      toast.error("Pick up and drop off addresses are required.");
+    // Validation - Only pickup location is required
+    // Dropoff, tariff, and customer details are optional
+    if (!form.pickupAddress) {
+      toast.error("Pickup address is required.");
       return;
     }
 
-    if (!form.passengerName || !form.phone) {
-      toast.error("Passenger name and phone are required.");
-      return;
-    }
-
-    if (!form.tariffId) {
-      toast.error("Please select a tariff.");
-      return;
-    }
-
-    if (
-      !form.pickupLat ||
-      !form.pickupLng ||
-      !form.dropoffLat ||
-      !form.dropoffLng
-    ) {
+    if (!form.pickupLat || !form.pickupLng) {
       toast.error(
-        "Please select valid pickup and dropoff locations from the suggestions."
+        "Please select a valid pickup location from the suggestions."
       );
       return;
     }
 
-    if (!form.estimatedDistance || !form.estimatedFare) {
-      toast.error(
-        "Unable to calculate fare. Please check your locations and tariff."
-      );
-      return;
-    }
+    // Optional validation warnings (not blocking)
+    // Tariff is optional - if not selected, backend should use default
+    // Customer details are optional
+    // Dropoff is optional
 
     let paymentIntentId: string | null = null;
     if (form.paymentMethod === "card") {
@@ -1083,6 +1153,10 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
         dropoffAddress: form.dropoffAddress,
         dropoffLat: form.dropoffLat,
         dropoffLng: form.dropoffLng,
+        // Intermediate stops/waypoints
+        stops: form.stops.length > 0 ? form.stops.map((s, i) => ({ ...s, order: i + 1 })) : undefined,
+        // Job source - DISPATCH for jobs created from dispatch panel
+        source: 'DISPATCH',
         passengerName: form.passengerName,
         phone: form.phone,
         email: form.email || undefined,
@@ -1300,756 +1374,327 @@ const JobComposerInner: React.FC<JobComposerInnerProps> = ({
   );
 
   return (
-    <div className="flex h-full flex-col bg-white border-l border-gray-200">
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-200 bg-white">
-        <h2 className="text-lg font-semibold text-gray-900">
-          {isEditMode ? "Edit Job" : "Create New Job"}
-        </h2>
-        {isEditMode && editJobData && (
-          <p className="text-sm text-gray-500">
-            Job ID: {editJobData.reference}
-          </p>
-        )}
-      </div>
-
-      {/* Scrollable Form Content */}
-      <div className="flex-1 overflow-y-auto">
-        <form onSubmit={handleSubmit} className="p-4 space-y-4">
-          {/* Customer Search */}
+    <div className={`flex flex-col h-full ${isDark ? 'bg-slate-900' : 'bg-white'}`}>
+      <form onSubmit={handleSubmit} className="flex-1 p-3 space-y-2 text-xs">
+        {/* Row 1: Pickup & Dropoff side by side */}
+        <div className="grid grid-cols-2 gap-2">
           <div className="relative">
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Search Customer
-            </label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-              <input
-                type="text"
-                placeholder="Search by name or phone"
-                value={form.customerSearch}
-                onChange={(e) => handleCustomerSearch(e.target.value)}
-                onFocus={() =>
-                  customerResults.length > 0 && setShowCustomerDropdown(true)
-                }
-                className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            {/* Customer Dropdown */}
-            {showCustomerDropdown && customerResults.length > 0 && (
-              <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
-                {customerResults.map((customer) => (
-                  <button
-                    key={customer.id}
-                    type="button"
-                    onClick={() => selectCustomer(customer)}
-                    className="w-full px-3 py-2 text-left hover:bg-blue-50 border-b border-gray-100 last:border-0"
-                  >
-                    <div className="font-medium text-sm text-gray-900">
-                      {customer.name}
-                    </div>
-                    <div className="text-xs text-gray-600">
-                      {customer.phone}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {customer.email}
-                    </div>
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Pickup *</label>
+            <MapPin className="absolute left-2 top-[22px] text-blue-500 w-3 h-3 z-10" />
+            <input
+              type="text"
+              placeholder="Pickup location"
+              value={form.pickupAddress}
+              onChange={(e) => handlePickupSearch(e.target.value)}
+              onFocus={() => pickupSuggestions.length > 0 && setShowPickupDropdown(true)}
+              required
+              className={`w-full pl-7 pr-2 py-1.5 border rounded text-xs focus:ring-1 focus:ring-blue-500 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`}
+            />
+            {showPickupDropdown && pickupSuggestions.length > 0 && (
+              <div className={`absolute z-50 w-full mt-0.5 border rounded shadow-lg max-h-32 overflow-y-auto ${isDark ? 'bg-slate-800 border-slate-600' : 'bg-white border-gray-300'}`}>
+                {pickupSuggestions.map((location) => (
+                  <button key={location.id} type="button" onClick={() => selectPickupLocation(location)}
+                    className={`w-full px-2 py-1 text-left text-xs border-b ${isDark ? 'hover:bg-slate-700 border-slate-700 text-slate-200' : 'hover:bg-blue-50 border-gray-100'}`}>
+                    {location.description}
                   </button>
                 ))}
               </div>
             )}
           </div>
-
-          {/* Pick and Drop off Address */}
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-xs font-medium text-gray-700">
-              Pick and Drop off Address
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                {placeProviderLabel}
-              </span>
-            </label>
-            <p className="text-[10px] uppercase tracking-wide text-slate-400">
-              Map provider: {mapProviderLabel}
-            </p>
-
-            {/* Pickup Location */}
-            <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 text-blue-500 w-4 h-4 z-10" />
-              <input
-                type="text"
-                placeholder="Enter pickup location"
-                value={form.pickupAddress}
-                onChange={(e) => handlePickupSearch(e.target.value)}
-                onFocus={() =>
-                  pickupSuggestions.length > 0 && setShowPickupDropdown(true)
-                }
-                className="w-full pl-9 pr-8 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-              {form.pickupAddress && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleChange("pickupAddress", "");
-                    handleChange("pickupLat", undefined);
-                    handleChange("pickupLng", undefined);
-                  }}
-                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-
-              {/* Pickup Dropdown */}
-              {showPickupDropdown && pickupSuggestions.length > 0 && (
-                <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-48 overflow-y-auto">
-                  {pickupSuggestions.map((location) => (
-                    <button
-                      key={location.id}
-                      type="button"
-                      onClick={() => selectPickupLocation(location)}
-                      className="w-full px-3 py-2 text-left hover:bg-blue-50 border-b border-gray-100 last:border-0 text-sm text-gray-900"
-                    >
-                      <MapPin className="inline w-3 h-3 mr-2 text-blue-500" />
-                      {location.description}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Reverse Button */}
-            <div className="flex justify-center">
-              <button
-                type="button"
-                onClick={reverseLocations}
-                disabled={!form.pickupAddress || !form.dropoffAddress}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded transition disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <ArrowLeftRight className="w-3 h-3" />
-                REVERSE LOCATIONS
-              </button>
-            </div>
-
-            {/* Dropoff Location */}
-            <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 text-green-500 w-4 h-4 z-10" />
-              <input
-                type="text"
-                placeholder="Enter dropoff location"
-                value={form.dropoffAddress}
-                onChange={(e) => handleDropoffSearch(e.target.value)}
-                onFocus={() =>
-                  dropoffSuggestions.length > 0 && setShowDropoffDropdown(true)
-                }
-                className="w-full pl-9 pr-8 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-              {form.dropoffAddress && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleChange("dropoffAddress", "");
-                    handleChange("dropoffLat", undefined);
-                    handleChange("dropoffLng", undefined);
-                  }}
-                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-
-              {/* Dropoff Dropdown */}
-              {showDropoffDropdown && dropoffSuggestions.length > 0 && (
-                <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-48 overflow-y-auto">
-                  {dropoffSuggestions.map((location) => (
-                    <button
-                      key={location.id}
-                      type="button"
-                      onClick={() => selectDropoffLocation(location)}
-                      className="w-full px-3 py-2 text-left hover:bg-blue-50 border-b border-gray-100 last:border-0 text-sm text-gray-900"
-                    >
-                      <MapPin className="inline w-3 h-3 mr-2 text-green-500" />
-                      {location.description}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {form.pickupLat &&
-            form.pickupLng &&
-            form.dropoffLat &&
-            form.dropoffLng && (
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                  Route Preview
-                </h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-[10px] uppercase tracking-wide text-slate-500">
-                      Pickup
-                    </p>
-                    <p className="font-medium text-slate-800 line-clamp-2">
-                      {form.pickupAddress}
-                    </p>
-                    <p className="text-slate-500">
-                      {form.pickupLat.toFixed(5)}, {form.pickupLng.toFixed(5)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] uppercase tracking-wide text-slate-500">
-                      Dropoff
-                    </p>
-                    <p className="font-medium text-slate-800 line-clamp-2">
-                      {form.dropoffAddress}
-                    </p>
-                    <p className="text-slate-500">
-                      {form.dropoffLat.toFixed(5)}, {form.dropoffLng.toFixed(5)}
-                    </p>
-                  </div>
-                </div>
-                {(form.estimatedDistance || form.estimatedFare) && (
-                  <div className="mt-3 flex items-center justify-between">
-                    <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                      Distance &amp; Fare
-                    </span>
-                    <span className="font-semibold text-slate-800">
-                      {form.estimatedDistance
-                        ? `${Number(form.estimatedDistance).toFixed(2)} km`
-                        : "—"}
-                      {form.estimatedFare
-                        ? ` · ${Number(form.estimatedFare).toFixed(2)}`
-                        : ""}
-                    </span>
-                  </div>
-                )}
+          <div className="relative">
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Dropoff</label>
+            <MapPin className="absolute left-2 top-[22px] text-green-500 w-3 h-3 z-10" />
+            <input
+              type="text"
+              placeholder="Dropoff (optional)"
+              value={form.dropoffAddress}
+              onChange={(e) => handleDropoffSearch(e.target.value)}
+              onFocus={() => dropoffSuggestions.length > 0 && setShowDropoffDropdown(true)}
+              className={`w-full pl-7 pr-2 py-1.5 border rounded text-xs focus:ring-1 focus:ring-blue-500 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`}
+            />
+            {showDropoffDropdown && dropoffSuggestions.length > 0 && (
+              <div className={`absolute z-50 w-full mt-0.5 border rounded shadow-lg max-h-32 overflow-y-auto ${isDark ? 'bg-slate-800 border-slate-600' : 'bg-white border-gray-300'}`}>
+                {dropoffSuggestions.map((location) => (
+                  <button key={location.id} type="button" onClick={() => selectDropoffLocation(location)}
+                    className={`w-full px-2 py-1 text-left text-xs border-b ${isDark ? 'hover:bg-slate-700 border-slate-700 text-slate-200' : 'hover:bg-blue-50 border-gray-100'}`}>
+                    {location.description}
+                  </button>
+                ))}
               </div>
             )}
+          </div>
+        </div>
 
-          {/* Detected Zone Info */}
-          {detectedZone && (
-            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-md p-3">
-              <div className="flex items-start">
-                <MapPin
-                  className="w-5 h-5 text-blue-600 mt-0.5 mr-2 flex-shrink-0"
-                  style={{ color: detectedZone.color }}
-                />
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-semibold text-gray-900">
-                      {detectedZone.name}
-                    </h4>
-                    <span
-                      className={`text-xs px-2 py-1 rounded-full ${
-                        detectedZone.isActive
-                          ? "bg-green-100 text-green-700"
-                          : "bg-gray-100 text-gray-700"
-                      }`}
-                    >
-                      {detectedZone.isActive ? "Active" : "Inactive"}
-                    </span>
-                  </div>
-                  {detectedZone.description && (
-                    <p className="text-xs text-gray-600 mt-1">
-                      {detectedZone.description}
-                    </p>
-                  )}
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className="text-xs text-gray-500">
-                      {zoneTariffs.length} tariff
-                      {zoneTariffs.length !== 1 ? "s" : ""} available
-                    </span>
-                    {detectingZone && (
-                      <span className="text-xs text-blue-600 animate-pulse">
-                        Detecting zone...
-                      </span>
+        {/* Intermediate Stops Section */}
+        <div className={`border border-dashed rounded p-2 ${isDark ? 'border-purple-700 bg-purple-900/30' : 'border-purple-300 bg-purple-50/50'}`}>
+          <div className="flex items-center justify-between mb-1">
+            <span className={`text-[10px] font-medium ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Intermediate Stops ({form.stops.length})</span>
+            <button
+              type="button"
+              onClick={() => {
+                // Only allow adding stops if there's a dropoff address
+                if (!form.dropoffAddress) {
+                  toast.error("Please set a dropoff location first");
+                  return;
+                }
+                const newStop = {
+                  address: '',
+                  order: form.stops.length + 1,
+                };
+                handleChange('stops', [...form.stops, newStop]);
+              }}
+              disabled={!form.dropoffAddress}
+              className={`text-[10px] px-2 py-0.5 rounded ${form.dropoffAddress ? 'bg-purple-600 text-white hover:bg-purple-700' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
+            >
+              + Add Stop
+            </button>
+          </div>
+          {form.stops.length > 0 && (
+            <div className="space-y-1.5">
+              {form.stops.map((stop, index) => (
+                <div key={`stop-${index}-${stop.order}`} className="relative flex items-center gap-1">
+                  <span className="text-[10px] text-purple-600 font-bold w-4">{index + 1}.</span>
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      placeholder={`Stop ${index + 1} address`}
+                      value={stop.address}
+                      onChange={(e) => handleStopSearch(e.target.value, index)}
+                      onFocus={() => setActiveStopIndex(index)}
+                      onBlur={() => setTimeout(() => setActiveStopIndex(null), 200)}
+                      className={`w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-purple-200'}`}
+                    />
+                    {/* Stop Suggestions Dropdown */}
+                    {activeStopIndex === index && stopSuggestions[index]?.length > 0 && (
+                      <div className={`absolute z-50 w-full mt-0.5 border rounded shadow-lg max-h-32 overflow-y-auto ${isDark ? 'bg-slate-800 border-slate-600' : 'bg-white border-purple-300'}`}>
+                        {stopSuggestions[index].map((location) => (
+                          <button
+                            key={location.id}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              selectStopLocation(location, index);
+                            }}
+                            className={`w-full px-2 py-1 text-left text-xs border-b ${isDark ? 'hover:bg-slate-700 border-slate-700 text-slate-200' : 'hover:bg-purple-50 border-gray-100'}`}
+                          >
+                            {location.description}
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newStops = form.stops.filter((_, i) => i !== index).map((s, i) => ({ ...s, order: i + 1 }));
+                      handleChange('stops', newStops);
+                      // Clean up suggestions
+                      setStopSuggestions(prev => {
+                        const updated = { ...prev };
+                        delete updated[index];
+                        return updated;
+                      });
+                    }}
+                    className="text-red-500 hover:text-red-700 text-xs px-1"
+                    title="Remove stop"
+                  >
+                    ✕
+                  </button>
                 </div>
-              </div>
+              ))}
             </div>
           )}
+          {form.stops.length === 0 && (
+            <p className={`text-[9px] italic ${isDark ? 'text-purple-400' : 'text-purple-500'}`}>
+              {form.dropoffAddress 
+                ? "No intermediate stops. Click \"+ Add Stop\" to add waypoints between pickup and dropoff."
+                : "Set a dropoff location first, then you can add intermediate stops."}
+            </p>
+          )}
+        </div>
 
-          {/* Tariff Selector */}
+        {/* Row 2: Vehicle Type, Tariff, Now/Later */}
+        <div className="grid grid-cols-3 gap-2">
           <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Select Tariff{" "}
-              {detectedZone && zoneTariffs.length > 0 && "(Zone-specific)"}
-            </label>
-            <select
-              value={form.tariffId}
-              onChange={(e) => handleChange("tariffId", e.target.value)}
-              className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-              required
-            >
-              <option value="">Select Tariff</option>
-              {(zoneTariffs.length > 0 ? zoneTariffs : tariffs).map(
-                (item: any) => {
-                  // Handle both ZoneTariff and regular Tariff types
-                  const tariff = item.tariff || item;
-                  const tariffId = item.tariffId || item.id || item.identifier;
-                  const isDefault = item.isDefault || false;
-
-                  return (
-                    <option key={tariffId} value={tariffId}>
-                      {tariff.name ?? tariff.identifier ?? "Tariff"}
-                      {isDefault ? " (Default)" : ""}
-                    </option>
-                  );
-                }
-              )}
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Vehicle</label>
+            <select value={form.vehicleType} onChange={(e) => handleChange("vehicleType", e.target.value)}
+              className={`w-full px-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300 bg-white'}`}>
+              <option value="SEDAN">Sedan</option>
+              <option value="SUV">SUV</option>
+              <option value="VAN">Van</option>
+              <option value="LUXURY">Luxury</option>
             </select>
           </div>
-
-          {/* Fare Calculation Display */}
-          {form.estimatedDistance && form.estimatedFare && (
-            <div className="bg-blue-50 border border-blue-200 rounded-md p-3 space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-700">Total Distance:</span>
-                <span className="font-semibold text-gray-900">
-                  {form.estimatedDistance.toFixed(2)} km
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-700">Base Fare:</span>
-                <span className="font-semibold text-gray-900">
-                  ${form.baseFare?.toFixed(2)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-700">Distance Fare:</span>
-                <span className="font-semibold text-gray-900">
-                  ${form.distanceFare?.toFixed(2)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-700">Waiting Fare:</span>
-                <span className="font-semibold text-gray-900">
-                  ${form.waitingFare?.toFixed(2)}
-                </span>
-              </div>
-              <div className="pt-2 border-t border-blue-300">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-gray-900">
-                    Estimated Fare:
-                  </span>
-                  <span className="text-lg font-bold text-blue-600">
-                    ${form.estimatedFare.toFixed(2)}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Now / Later Toggle */}
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                console.log("🕐 [NOW BUTTON] Clicked - setting scheduledFor to 'now'");
-                handleChange("scheduledFor", "now");
-              }}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition ${
-                form.scheduledFor === "now"
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-              }`}
-            >
-              Now {form.scheduledFor === "now" && "✓"}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                console.log("🕐 [LATER BUTTON] Clicked - setting scheduledFor to 'later'");
-                handleChange("scheduledFor", "later");
-              }}
-              className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition ${
-                form.scheduledFor === "later"
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-              }`}
-            >
-              Later {form.scheduledFor === "later" && "✓"}
-            </button>
+          <div>
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Tariff</label>
+            <select value={form.tariffId} onChange={(e) => handleChange("tariffId", e.target.value)}
+              className={`w-full px-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300 bg-white'}`}>
+              {(zoneTariffs.length > 0 ? zoneTariffs : tariffs).map((item: any) => {
+                const tariff = item.tariff || item;
+                const tariffId = item.tariffId || item.id || item.identifier;
+                return <option key={tariffId} value={tariffId}>{tariff.name ?? "Tariff"}</option>;
+              })}
+            </select>
           </div>
-
-          <div className="text-xs text-gray-500 mt-1">
-            Current: {form.scheduledFor} {form.scheduledDate && `(${form.scheduledDate} ${form.scheduledTime || ''})`}
-          </div>
-
-          {/* Schedule Date/Time (if Later selected) */}
-          {form.scheduledFor === "later" && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Date
-                </label>
-                <input
-                  type="date"
-                  value={form.scheduledDate || ""}
-                  onChange={(e) => {
-                    console.log("📅 Date changed to:", e.target.value);
-                    handleChange("scheduledDate", e.target.value);
-                  }}
-                  min={new Date().toISOString().split("T")[0]}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Time
-                </label>
-                <input
-                  type="time"
-                  value={form.scheduledTime || ""}
-                  onChange={(e) => {
-                    console.log("⏰ Time changed to:", e.target.value);
-                    handleChange("scheduledTime", e.target.value);
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Account/Customer Details */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
-              <User className="w-4 h-4" />
-              Account/Customer Details
-            </h3>
-
-            {/* Passenger Name */}
-            <div className="relative">
-              <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-              <input
-                type="text"
-                placeholder="Passenger Name"
-                value={form.passengerName}
-                onChange={(e) => handleChange("passengerName", e.target.value)}
-                required
-                className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            {/* Phone */}
-            <div className="relative">
-              <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-              <input
-                type="tel"
-                placeholder="+974 XXXX XXXX"
-                value={form.phone}
-                onChange={(e) => handleChange("phone", e.target.value)}
-                required
-                className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            {/* Email */}
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-              <input
-                type="email"
-                placeholder="customer@example.com"
-                value={form.email}
-                onChange={(e) => handleChange("email", e.target.value)}
-                className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            {/* Validation Code */}
-            <div>
-              <input
-                type="text"
-                placeholder="Validation Code (for special purposes)"
-                value={form.validationCode}
-                onChange={(e) => handleChange("validationCode", e.target.value)}
-                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            {/* Job Related Info */}
-            <div>
-              <textarea
-                placeholder="Job Related Info (special instructions, notes, etc.)"
-                value={form.notes}
-                onChange={(e) => handleChange("notes", e.target.value)}
-                rows={3}
-                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-              />
-            </div>
-          </div>
-
-          {/* Job Requirements */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-gray-900">
-              Job Requirements
-            </h3>
-
-            <div className="grid grid-cols-4 gap-3">
-              {/* Passengers */}
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">
-                  <Users className="w-3 h-3 inline mr-1" />
-                  Passengers
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  value={form.passengers}
-                  onChange={(e) =>
-                    handleChange("passengers", parseInt(e.target.value) || 1)
-                  }
-                  className="w-full px-2 py-2 border border-gray-300 rounded-md text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
-              {/* Bags */}
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">
-                  <Briefcase className="w-3 h-3 inline mr-1" />
-                  Bags
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={form.bags}
-                  onChange={(e) =>
-                    handleChange("bags", parseInt(e.target.value) || 0)
-                  }
-                  className="w-full px-2 py-2 border border-gray-300 rounded-md text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
-              {/* Wheelchairs */}
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">
-                  <Accessibility className="w-3 h-3 inline mr-1" />
-                  Wheelchairs
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={form.wheelchairs}
-                  onChange={(e) =>
-                    handleChange("wheelchairs", parseInt(e.target.value) || 0)
-                  }
-                  className="w-full px-2 py-2 border border-gray-300 rounded-md text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
-              {/* Vehicles Needed */}
-              <div>
-                <label className="block text-xs text-gray-600 mb-1">
-                  <Car className="w-3 h-3 inline mr-1" />
-                  Vehicles
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  value={form.vehiclesNeeded}
-                  onChange={(e) =>
-                    handleChange(
-                      "vehiclesNeeded",
-                      parseInt(e.target.value) || 1
-                    )
-                  }
-                  className="w-full px-2 py-2 border border-gray-300 rounded-md text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Payment Method */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-gray-900">
-              Payment Method
-            </h3>
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => handleChange("paymentMethod", "cash")}
-                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition flex items-center justify-center gap-2 ${
-                  form.paymentMethod === "cash"
-                    ? "bg-green-600 text-white"
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                }`}
-              >
-                <DollarSign className="w-4 h-4" />
-                Cash
+          <div>
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>When</label>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => handleChange("scheduledFor", "now")}
+                className={`flex-1 py-1 rounded text-[10px] font-medium ${form.scheduledFor === "now" ? "bg-blue-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                Now
               </button>
-              <button
-                type="button"
-                disabled={!cardPaymentsEnabled}
-                onClick={() => {
-                  if (!cardPaymentsEnabled) {
-                    toast.error("Card payments are not enabled.");
-                    return;
-                  }
-                  handleChange("paymentMethod", "card");
-                }}
-                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition flex items-center justify-center gap-2 ${
-                  form.paymentMethod === "card"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                } ${
-                  !cardPaymentsEnabled ? "opacity-50 cursor-not-allowed" : ""
-                }`}
-              >
-                <CreditCard className="w-4 h-4" />
-                Card
+              <button type="button" onClick={() => handleChange("scheduledFor", "later")}
+                className={`flex-1 py-1 rounded text-[10px] font-medium ${form.scheduledFor === "later" ? "bg-blue-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                Later
               </button>
             </div>
-
-            {/* Card Details (if Card selected) */}
-            {form.paymentMethod === "card" && (
-              <div className="space-y-2 p-3 bg-gray-50 rounded-md border border-gray-200">
-                {!cardPaymentsEnabled ? (
-                  <p className="text-xs text-amber-600">
-                    Card payments are currently disabled. Update Stripe settings
-                    in the Owner Panel to enable card processing.
-                  </p>
-                ) : (
-                  <>
-                    <p className="text-xs text-gray-600 mb-2">
-                      Secure card entry via Stripe
-                    </p>
-                    <div className="rounded-md border border-gray-300 bg-white px-3 py-2">
-                      <CardElement
-                        options={{
-                          style: {
-                            base: {
-                              fontSize: "14px",
-                              color: "#1f2937",
-                              "::placeholder": { color: "#94a3b8" },
-                            },
-                            invalid: { color: "#ef4444" },
-                          },
-                        }}
-                      />
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
           </div>
+        </div>
 
-          {/* Driver Assignment */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-gray-900">
-              Driver Assignment
-            </h3>
+        {/* Row 2b: Date/Time if Later */}
+        {form.scheduledFor === "later" && (
+          <div className="grid grid-cols-2 gap-2">
+            <input type="date" value={form.scheduledDate || ""} onChange={(e) => handleChange("scheduledDate", e.target.value)}
+              min={new Date().toISOString().split("T")[0]} className={`px-2 py-1 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+            <input type="time" value={form.scheduledTime || ""} onChange={(e) => handleChange("scheduledTime", e.target.value)}
+              className={`px-2 py-1 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+          </div>
+        )}
 
-            <div className="space-y-2">
-              {/* Assignment Type */}
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleChange("driverAssignment", "auto");
-                    handleChange("selectedDriverId", undefined);
-                  }}
-                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition ${
-                    form.driverAssignment === "auto"
-                      ? "bg-blue-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  Auto-Assign
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleChange("driverAssignment", "manual")}
-                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition ${
-                    form.driverAssignment === "manual"
-                      ? "bg-blue-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  Manual
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleChange("driverAssignment", "unassigned");
-                    handleChange("selectedDriverId", undefined);
-                  }}
-                  className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition ${
-                    form.driverAssignment === "unassigned"
-                      ? "bg-orange-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  Unassigned
-                </button>
-              </div>
+        {/* Row 3: Customer Name & Phone */}
+        <div className="grid grid-cols-2 gap-2">
+          <div className="relative">
+            <User className={`absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 ${isDark ? 'text-slate-500' : 'text-gray-400'}`} />
+            <input type="text" placeholder="Passenger name" value={form.passengerName}
+              onChange={(e) => handleChange("passengerName", e.target.value)}
+              className={`w-full pl-7 pr-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`} />
+          </div>
+          <div className="relative">
+            <Phone className={`absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 ${isDark ? 'text-slate-500' : 'text-gray-400'}`} />
+            <input type="tel" placeholder="Phone" value={form.phone}
+              onChange={(e) => handleChange("phone", e.target.value)}
+              className={`w-full pl-7 pr-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`} />
+          </div>
+        </div>
 
-              {/* Manual Driver Selection */}
-              {form.driverAssignment === "manual" && (
-                <div className="relative">
-                  <select
-                    value={form.selectedDriverId || ""}
-                    onChange={(e) =>
-                      handleChange("selectedDriverId", e.target.value)
-                    }
-                    className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white appearance-none pr-8"
-                    required
-                  >
-                    <option value="">Select Driver</option>
-                    {activeDrivers.map((driver: any) => (
-                      <option key={driver.id} value={driver.id}>
-                        {driver.name} - {driver.vehicle || "N/A"} -{" "}
-                        {driver.status}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-                </div>
-              )}
+        {/* Row 4: Email & Notes */}
+        <div className="grid grid-cols-2 gap-2">
+          <div className="relative">
+            <Mail className={`absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 ${isDark ? 'text-slate-500' : 'text-gray-400'}`} />
+            <input type="email" placeholder="Email" value={form.email}
+              onChange={(e) => handleChange("email", e.target.value)}
+              className={`w-full pl-7 pr-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`} />
+          </div>
+          <input type="text" placeholder="Notes / Instructions" value={form.notes}
+            onChange={(e) => handleChange("notes", e.target.value)}
+            className={`w-full px-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 placeholder-slate-500' : 'border-gray-300'}`} />
+        </div>
 
-              {/* Help Text */}
-              <p className="text-xs text-gray-500">
-                {form.driverAssignment === "auto" &&
-                  "Job will be automatically assigned to the most suitable driver based on proximity and availability."}
-                {form.driverAssignment === "manual" &&
-                  "Select a driver to send the job directly to them."}
-                {form.driverAssignment === "unassigned" &&
-                  "Job will remain unassigned until manually assigned by dispatcher."}
-              </p>
+        {/* Row 5: Requirements (Passengers, Bags, Wheelchairs, Vehicles) */}
+        <div className="grid grid-cols-4 gap-2">
+          <div className="text-center">
+            <label className={`block text-[10px] ${isDark ? 'text-slate-500' : 'text-gray-500'}`}><Users className="w-3 h-3 inline" /> Pass</label>
+            <input type="number" min="1" value={form.passengers}
+              onChange={(e) => handleChange("passengers", parseInt(e.target.value) || 1)}
+              className={`w-full py-1 border rounded text-xs text-center ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+          </div>
+          <div className="text-center">
+            <label className={`block text-[10px] ${isDark ? 'text-slate-500' : 'text-gray-500'}`}><Briefcase className="w-3 h-3 inline" /> Bags</label>
+            <input type="number" min="0" value={form.bags}
+              onChange={(e) => handleChange("bags", parseInt(e.target.value) || 0)}
+              className={`w-full py-1 border rounded text-xs text-center ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+          </div>
+          <div className="text-center">
+            <label className={`block text-[10px] ${isDark ? 'text-slate-500' : 'text-gray-500'}`}><Accessibility className="w-3 h-3 inline" /> WC</label>
+            <input type="number" min="0" value={form.wheelchairs}
+              onChange={(e) => handleChange("wheelchairs", parseInt(e.target.value) || 0)}
+              className={`w-full py-1 border rounded text-xs text-center ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+          </div>
+          <div className="text-center">
+            <label className={`block text-[10px] ${isDark ? 'text-slate-500' : 'text-gray-500'}`}><Car className="w-3 h-3 inline" /> Veh</label>
+            <input type="number" min="1" value={form.vehiclesNeeded}
+              onChange={(e) => handleChange("vehiclesNeeded", parseInt(e.target.value) || 1)}
+              className={`w-full py-1 border rounded text-xs text-center ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300'}`} />
+          </div>
+        </div>
+
+        {/* Row 6: Payment & Driver Assignment */}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Payment</label>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => handleChange("paymentMethod", "cash")}
+                className={`flex-1 py-1 rounded text-[10px] font-medium flex items-center justify-center gap-1 ${form.paymentMethod === "cash" ? "bg-green-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                <DollarSign className="w-3 h-3" /> Cash
+              </button>
+              <button type="button" disabled={!cardPaymentsEnabled} onClick={() => cardPaymentsEnabled && handleChange("paymentMethod", "card")}
+                className={`flex-1 py-1 rounded text-[10px] font-medium flex items-center justify-center gap-1 ${form.paymentMethod === "card" ? "bg-blue-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"} ${!cardPaymentsEnabled ? "opacity-50" : ""}`}>
+                <CreditCard className="w-3 h-3" /> Card
+              </button>
             </div>
           </div>
-        </form>
-      </div>
+          <div>
+            <label className={`block text-[10px] font-medium mb-0.5 ${isDark ? 'text-slate-400' : 'text-gray-600'}`}>Driver</label>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => { handleChange("driverAssignment", "auto"); handleChange("selectedDriverId", undefined); }}
+                className={`flex-1 py-1 rounded text-[10px] font-medium ${form.driverAssignment === "auto" ? "bg-blue-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                Auto
+              </button>
+              <button type="button" onClick={() => handleChange("driverAssignment", "manual")}
+                className={`flex-1 py-1 rounded text-[10px] font-medium ${form.driverAssignment === "manual" ? "bg-blue-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                Manual
+              </button>
+              <button type="button" onClick={() => { handleChange("driverAssignment", "unassigned"); handleChange("selectedDriverId", undefined); }}
+                className={`flex-1 py-1 rounded text-[10px] font-medium ${form.driverAssignment === "unassigned" ? "bg-orange-600 text-white" : isDark ? "bg-slate-700 text-slate-300" : "bg-gray-100"}`}>
+                None
+              </button>
+            </div>
+          </div>
+        </div>
 
-      {/* Footer Actions */}
-      <div className="border-t border-gray-200 px-4 py-3 bg-white flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={clearForm}
-          className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition"
-        >
-          CLEAR
+        {/* Manual Driver Selector */}
+        {form.driverAssignment === "manual" && (
+          <select value={form.selectedDriverId || ""} onChange={(e) => handleChange("selectedDriverId", e.target.value)}
+            className={`w-full px-2 py-1.5 border rounded text-xs ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200' : 'border-gray-300 bg-white'}`}>
+            <option value="">Select Driver</option>
+            {activeDrivers.map((driver: any) => (
+              <option key={driver.id} value={driver.id}>{driver.name} - {driver.status}</option>
+            ))}
+          </select>
+        )}
+
+        {/* Card Element if card payment */}
+        {form.paymentMethod === "card" && cardPaymentsEnabled && (
+          <div className={`p-2 rounded border ${isDark ? 'bg-slate-800 border-slate-600' : 'bg-gray-50'}`}>
+            <CardElement options={{ style: { base: { fontSize: "12px", color: isDark ? '#e2e8f0' : '#1f2937' } } }} />
+          </div>
+        )}
+
+        {/* Fare Display */}
+        {form.estimatedFare && (
+          <div className={`flex justify-between items-center px-2 py-1 rounded text-xs ${isDark ? 'bg-blue-900/30' : 'bg-blue-50'}`}>
+            <span className={isDark ? 'text-slate-400' : 'text-gray-600'}>Est. Fare: <strong className="text-blue-500">${form.estimatedFare.toFixed(2)}</strong></span>
+            {form.estimatedDistance && <span className={isDark ? 'text-slate-500' : 'text-gray-500'}>{form.estimatedDistance.toFixed(1)} km</span>}
+          </div>
+        )}
+
+        {/* Zone Info */}
+        {detectedZone && (
+          <div className={`text-[10px] px-2 py-1 rounded ${isDark ? 'text-slate-500 bg-slate-800' : 'text-gray-500 bg-gray-50'}`}>
+            Zone: <span className="font-medium">{detectedZone.name}</span>
+          </div>
+        )}
+      </form>
+
+      {/* Footer Actions - Compact */}
+      <div className={`border-t px-3 py-2 flex items-center justify-between gap-2 ${isDark ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-gray-50'}`}>
+        <button type="button" onClick={clearForm}
+          className={`px-3 py-1.5 border rounded text-xs font-medium ${isDark ? 'border-slate-600 text-slate-400 bg-slate-700 hover:bg-slate-600' : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50'}`}>
+          Clear
         </button>
-        <button
-          type="button"
-          disabled
-          className="px-4 py-2 border border-blue-200 rounded-md text-sm font-medium text-blue-300 bg-white cursor-not-allowed"
-        >
-          UPDATE JOB
-        </button>
-        <button
-          type="submit"
-          onClick={handleSubmit}
-          disabled={loading || processingPayment}
-          className="px-4 py-2 rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {(() => {
-            if (loading || processingPayment) return "PROCESSING...";
-            return isEditMode ? "UPDATE JOB" : "CREATE NEW JOB";
-          })()}
+        <button type="submit" onClick={handleSubmit} disabled={loading || processingPayment}
+          className="px-4 py-1.5 rounded text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+          {loading || processingPayment ? "..." : isEditMode ? "Update" : "Create Job"}
         </button>
       </div>
     </div>

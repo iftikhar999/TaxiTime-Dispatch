@@ -6,30 +6,31 @@
 import { api } from "./api";
 
 export interface CreateJobPayload {
-  // Customer
+  // Customer (optional)
   customerId?: string;
-  passengerName: string;
-  phone: string;
+  passengerName?: string;
+  phone?: string;
   email?: string;
 
-  // Locations
+  // Locations - only pickup is required
   pickupAddress: string;
   pickupLat: number;
   pickupLng: number;
-  dropoffAddress: string;
-  dropoffLat: number;
-  dropoffLng: number;
+  dropoffAddress?: string;
+  dropoffLat?: number;
+  dropoffLng?: number;
 
-  // Pricing
-  tariffId: string;
-  estimatedDistance: number;
-  estimatedFare: number;
+  // Pricing (optional - backend can use defaults)
+  tariffId?: string;
+  estimatedDistance?: number;
+  estimatedFare?: number;
   baseFare?: number;
   distanceFare?: number;
   waitingFare?: number;
 
   // Schedule
-  scheduledFor?: Date | string;
+  scheduledFor?: Date | string | null;
+  scheduledTime?: Date | string | null;
 
   // Job details
   notes?: string;
@@ -40,7 +41,7 @@ export interface CreateJobPayload {
   vehiclesNeeded?: number;
 
   // Payment
-  paymentMethod: "cash" | "card";
+  paymentMethod?: "cash" | "card";
   paymentIntentId?: string;
   currency?: string;
 
@@ -76,39 +77,40 @@ export interface AssignDriverPayload {
 
 /**
  * Create a new job/ride
+ * Only pickup location is required, everything else is optional
  */
 export async function createJob(
   payload: CreateJobPayload
 ): Promise<JobResponse> {
   try {
     const response = await api.post<JobResponse>("/api/dispatch/jobs", {
-      // Customer info
+      // Customer info (optional)
       customerId: payload.customerId,
-      passengerName: payload.passengerName,
-      phone: payload.phone,
+      passengerName: payload.passengerName || undefined,
+      phone: payload.phone || undefined,
       email: payload.email,
 
-      // Locations
+      // Locations - pickup is required, dropoff is optional
       pickup: {
         address: payload.pickupAddress,
         lat: payload.pickupLat,
         lng: payload.pickupLng,
       },
-      destination: {
+      destination: payload.dropoffAddress ? {
         address: payload.dropoffAddress,
         lat: payload.dropoffLat,
         lng: payload.dropoffLng,
-      },
+      } : undefined,
 
-      // Pricing
-      tariffId: payload.tariffId,
+      // Pricing (optional)
+      tariffId: payload.tariffId || undefined,
       estimatedDistance: payload.estimatedDistance,
       estimatedFare: payload.estimatedFare,
-      fareBreakdown: {
+      fareBreakdown: payload.baseFare || payload.distanceFare || payload.waitingFare ? {
         base: payload.baseFare,
         distance: payload.distanceFare,
         waiting: payload.waitingFare,
-      },
+      } : undefined,
 
       // Schedule
       scheduledFor: payload.scheduledFor,
@@ -125,8 +127,8 @@ export async function createJob(
         currency: payload.currency,
       },
 
-      // Payment
-      paymentMethod: payload.paymentMethod,
+      // Payment (default to cash if not specified)
+      paymentMethod: payload.paymentMethod || "cash",
       paymentIntentId: payload.paymentIntentId,
 
       // Driver assignment

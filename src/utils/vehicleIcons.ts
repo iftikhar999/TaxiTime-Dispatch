@@ -1,9 +1,37 @@
 /**
  * Centralized Vehicle Icon Mapping Utility
  * Maps vehicle types to their corresponding SVG icons for map markers and driver cards
+ * Supports status-based icons: Free (green), Busy (red), Away (yellow), Clearing (blue)
+ * 
+ * UPDATED: Now uses ORIGINAL SVG templates from old DispatchConsole
  */
 
+// Import from the SVG templates module for local use
+import { getVehicleSvgDataUrl as originalGetVehicleSvgDataUrl } from './vehicleSvgTemplates';
+
+// Re-export from the new SVG templates module
+export { getCarSvg, getVehicleSvgDataUrl as getOriginalVehicleSvgDataUrl, getStatusColor, getVanSvg, STATUS_COLORS } from './vehicleSvgTemplates';
+
 export type VehicleType = "sedan" | "suv" | "van" | "motorcycle";
+export type DriverStatus = "AVAILABLE" | "BUSY" | "AWAY" | "CLEARING" | "OFFLINE";
+
+// Status to icon file mapping (matches old DispatchConsole naming)
+const STATUS_ICON_MAP: Record<DriverStatus, string> = {
+  AVAILABLE: 'FreeVehicle.png',   // Green - Free/Available
+  BUSY: 'BusyVehicle.png',        // Red - On a job
+  AWAY: 'AwayVehicle.png',        // Yellow - Away/Break
+  CLEARING: 'ClearingVehicle.png', // Blue - Clearing/Finishing
+  OFFLINE: 'AwayVehicle.png',     // Default to Away for offline
+};
+
+// Status dot icons for smaller displays
+const STATUS_DOT_MAP: Record<DriverStatus, string> = {
+  AVAILABLE: 'FreeDot.png',
+  BUSY: 'BusyDot.png',
+  AWAY: 'AwayDot.png',
+  CLEARING: 'ClearingDot.png',
+  OFFLINE: 'AwayDot.png',
+};
 
 // Vehicle type mapping - maps various input formats to standardized vehicle types
 const VEHICLE_TYPE_MAPPING: Record<string, VehicleType> = {
@@ -47,6 +75,82 @@ export const getVehicleType = (vehicleType?: string | null): VehicleType => {
 
   const normalized = vehicleType.toLowerCase().trim();
   return VEHICLE_TYPE_MAPPING[normalized] || "sedan";
+};
+
+/**
+ * Normalize driver status to our standard status types
+ */
+export const normalizeDriverStatus = (status?: string | null): DriverStatus => {
+  if (!status) return "OFFLINE";
+  
+  const normalized = status.toUpperCase().trim();
+  
+  // Map various status strings to our standard types
+  if (normalized.includes('AVAIL') || normalized.includes('FREE') || normalized === 'ONLINE') {
+    return 'AVAILABLE';
+  }
+  if (normalized.includes('BUSY') || normalized.includes('ACTIVE') || normalized.includes('JOB')) {
+    return 'BUSY';
+  }
+  if (normalized.includes('AWAY') || normalized.includes('BREAK') || normalized.includes('PAUSE')) {
+    return 'AWAY';
+  }
+  if (normalized.includes('CLEAR') || normalized.includes('FINISH')) {
+    return 'CLEARING';
+  }
+  
+  return 'OFFLINE';
+};
+
+/**
+ * Get status-based vehicle icon URL (from DispatchConsole icons)
+ * These are the classic vehicle icons with status colors
+ */
+export const getStatusVehicleIconUrl = (status?: string | null): string => {
+  const normalizedStatus = normalizeDriverStatus(status);
+  const iconFile = STATUS_ICON_MAP[normalizedStatus];
+  return `/vehicle-icons/${iconFile}`;
+};
+
+/**
+ * Get status dot icon URL (smaller version for lists/cards)
+ */
+export const getStatusDotIconUrl = (status?: string | null): string => {
+  const normalizedStatus = normalizeDriverStatus(status);
+  const iconFile = STATUS_DOT_MAP[normalizedStatus];
+  return `/vehicle-icons/${iconFile}`;
+};
+
+/**
+ * Get status color for driver based on status
+ * Uses the EXACT same colors as the old DispatchConsole
+ */
+export const getDriverStatusColor = (status?: string | null): string => {
+  const normalizedStatus = normalizeDriverStatus(status);
+  
+  // Colors matching old DispatchConsole exactly:
+  // Available = #00e600 (green), Picking = #3333ff (blue), Away = #ffaf1a (yellow), Busy = #ff3333 (red)
+  const colors: Record<DriverStatus, string> = {
+    AVAILABLE: '#00e600', // Green - matches old "Available"
+    BUSY: '#ff3333',      // Red - matches old "Busy"
+    AWAY: '#ffaf1a',      // Yellow/Orange - matches old "Away"
+    CLEARING: '#3333ff',  // Blue - matches old "Picking"
+    OFFLINE: '#808080',   // Gray for offline
+  };
+  
+  return colors[normalizedStatus];
+};
+
+/**
+ * Generate inline SVG data URL for vehicle marker
+ * This creates the SAME taxi icon style as the old DispatchConsole
+ * with dynamic color based on driver status
+ * 
+ * NOW SUPPORTS VEHICLE TYPE: 'car' (sedan) or 'van' (wheelchair van)
+ */
+export const getVehicleSvgDataUrl = (status?: string | null, vehicleNumber?: string, vehicleType?: string | null): string => {
+  // Use the ORIGINAL SVG template function (imported at top as originalGetVehicleSvgDataUrl)
+  return originalGetVehicleSvgDataUrl(vehicleType || 'car', status, vehicleNumber);
 };
 
 /**

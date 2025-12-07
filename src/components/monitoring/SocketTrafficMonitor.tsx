@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTheme } from "../../contexts/ThemeContext";
 import { useDispatchSocket } from "../../providers/SocketProvider";
 
 interface SocketMessage {
@@ -18,6 +19,7 @@ export const SocketTrafficMonitor: React.FC = () => {
   const [driverEvents, setDriverEvents] = useState(0);
   const [statusChanges, setStatusChanges] = useState(0);
   const { socket } = useDispatchSocket();
+  const { isDark } = useTheme();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageCounter = useRef(0);
 
@@ -180,13 +182,13 @@ export const SocketTrafficMonitor: React.FC = () => {
   };
 
   return (
-    <div className="bg-white border-b border-gray-200 shadow-sm">
+    <div className={isDark ? "bg-slate-800 border-b border-slate-700 shadow-sm" : "bg-white border-b border-gray-200 shadow-sm"}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 bg-gray-50 border-b border-gray-200">
+      <div className={`flex items-center justify-between px-4 py-2 border-b ${isDark ? "bg-slate-700 border-slate-600" : "bg-gray-50 border-gray-200"}`}>
         <div className="flex items-center gap-4">
           <button
             onClick={() => setIsExpanded(!isExpanded)}
-            className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+            className={`flex items-center gap-2 text-sm font-medium ${isDark ? "text-slate-200 hover:text-white" : "text-gray-700 hover:text-gray-900"}`}
           >
             <span
               className={`transform transition-transform ${
@@ -199,26 +201,26 @@ export const SocketTrafficMonitor: React.FC = () => {
           </button>
 
           {socket?.connected ? (
-            <span className="flex items-center gap-1 text-xs text-green-600">
+            <span className="flex items-center gap-1 text-xs text-green-500">
               <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
               Connected
             </span>
           ) : (
-            <span className="flex items-center gap-1 text-xs text-red-600">
+            <span className="flex items-center gap-1 text-xs text-red-500">
               <div className="w-2 h-2 bg-red-500 rounded-full"></div>
               Disconnected
             </span>
           )}
 
-          <span className="text-xs text-gray-500">
+          <span className={`text-xs ${isDark ? "text-slate-400" : "text-gray-500"}`}>
             {messages.length} messages
           </span>
 
-          <span className="text-xs text-blue-600 font-medium">
+          <span className="text-xs text-blue-400 font-medium">
             {driverEvents} driver events
           </span>
 
-          <span className="text-xs text-green-600 font-medium">
+          <span className="text-xs text-green-400 font-medium">
             {statusChanges} status changes
           </span>
         </div>
@@ -228,8 +230,8 @@ export const SocketTrafficMonitor: React.FC = () => {
             onClick={() => setIsPaused(!isPaused)}
             className={`px-2 py-1 text-xs rounded ${
               isPaused
-                ? "bg-green-100 text-green-700 hover:bg-green-200"
-                : "bg-yellow-100 text-yellow-700 hover:bg-yellow-200"
+                ? isDark ? "bg-green-800 text-green-200 hover:bg-green-700" : "bg-green-100 text-green-700 hover:bg-green-200"
+                : isDark ? "bg-yellow-800 text-yellow-200 hover:bg-yellow-700" : "bg-yellow-100 text-yellow-700 hover:bg-yellow-200"
             }`}
           >
             {isPaused ? "▶ Resume" : "⏸ Pause"}
@@ -241,7 +243,7 @@ export const SocketTrafficMonitor: React.FC = () => {
               localStorage.setItem("dispatch_force_refresh", "true");
               window.location.reload();
             }}
-            className="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+            className={`px-2 py-1 text-xs rounded ${isDark ? "bg-blue-800 text-blue-200 hover:bg-blue-700" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
             title="Force refresh driver data from database"
           >
             🔄 Force Refresh
@@ -253,7 +255,7 @@ export const SocketTrafficMonitor: React.FC = () => {
               localStorage.setItem("dispatch_force_clear", "true");
               window.location.reload();
             }}
-            className="px-2 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
+            className={`px-2 py-1 text-xs rounded ${isDark ? "bg-purple-800 text-purple-200 hover:bg-purple-700" : "bg-purple-100 text-purple-700 hover:bg-purple-200"}`}
             title="Clear all drivers from dispatch portal"
           >
             🧹 Clear Drivers
@@ -261,7 +263,7 @@ export const SocketTrafficMonitor: React.FC = () => {
 
           <button
             onClick={clearMessages}
-            className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+            className={`px-2 py-1 text-xs rounded ${isDark ? "bg-red-800 text-red-200 hover:bg-red-700" : "bg-red-100 text-red-700 hover:bg-red-200"}`}
           >
             Clear
           </button>
@@ -278,7 +280,11 @@ export const SocketTrafficMonitor: React.FC = () => {
               placeholder="Filter events (e.g., driver, job, status)..."
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              className="w-full px-3 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className={`w-full px-3 py-1 text-sm border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                isDark 
+                  ? "bg-slate-700 border-slate-600 text-slate-200 placeholder-slate-400" 
+                  : "bg-white border-gray-300 text-gray-900 placeholder-gray-400"
+              }`}
             />
           </div>
 

@@ -1,14 +1,17 @@
 import {
-  GoogleMap,
-  LoadScript,
-  Marker,
-  Polygon,
-  Polyline,
-  TrafficLayer,
+    GoogleMap,
+    LoadScript,
+    Marker,
+    Polygon,
+    Polyline,
+    TrafficLayer,
 } from '@react-google-maps/api';
+import classNames from 'classnames';
 import { Navigation, Settings, Target } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTheme } from '../../contexts/ThemeContext';
 import { useDispatchStore } from '../../store/useDispatchStore';
+import { getVehicleSvgDataUrl, normalizeDriverStatus } from '../../utils/vehicleIcons';
 
 // Google Maps API libraries (valid libraries only)
 const libraries: ("geometry" | "drawing" | "places" | "visualization")[] = [
@@ -26,42 +29,58 @@ interface AdvancedMapState {
 
 // Marker interfaces removed - zones only
 
-// 📱 Control Panel Component
+// 📱 Control Panel Component - Responsive with Dark Mode
 const ControlPanel: React.FC<{
   mapState: AdvancedMapState;
   setMapState: React.Dispatch<React.SetStateAction<AdvancedMapState>>;
   onRecenterMap: () => void;
-}> = ({ mapState, setMapState, onRecenterMap }) => (
-  <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg p-4 space-y-3 z-10">
-    <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-      <Settings size={16} />
+  isDark: boolean;
+}> = ({ mapState, setMapState, onRecenterMap, isDark }) => (
+  <div className={classNames(
+    "absolute top-2 sm:top-3 right-2 sm:right-3 rounded-md shadow-lg p-2 sm:p-3 space-y-1.5 sm:space-y-2 z-10",
+    isDark ? "bg-slate-800 border border-slate-700" : "bg-white"
+  )}>
+    <h3 className={classNames(
+      "text-[9px] sm:text-[10px] md:text-xs font-medium flex items-center gap-1 sm:gap-1.5",
+      isDark ? "text-slate-200" : "text-gray-800"
+    )}>
+      <Settings className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
       Map Controls
     </h3>
     
-    <div className="space-y-2">
-      <label className="flex items-center gap-2 text-sm">
+    <div className="space-y-1 sm:space-y-1.5">
+      <label className={classNames(
+        "flex items-center gap-1 sm:gap-1.5 text-[8px] sm:text-[9px] md:text-[10px] cursor-pointer",
+        isDark ? "text-slate-300" : "text-gray-700"
+      )}>
         <input
           type="checkbox"
           checked={mapState.showTraffic}
           onChange={(e) => setMapState(prev => ({ ...prev, showTraffic: e.target.checked }))}
-          className="rounded"
+          className={classNames(
+            "rounded w-3 h-3 sm:w-3.5 sm:h-3.5",
+            isDark ? "bg-slate-700 border-slate-600" : ""
+          )}
         />
-        <Navigation size={14} />
+        <Navigation className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         Traffic Layer
       </label>
       
-        {/* Demand Heatmap removed */}
-      
       {/* Divider */}
-      <div className="border-t border-gray-200 my-2"></div>
+      <div className={classNames("border-t my-1 sm:my-1.5", isDark ? "border-slate-700" : "border-gray-200")}></div>
       
       {/* Recenter Button */}
       <button
         onClick={onRecenterMap}
-        className="w-full flex items-center gap-2 text-sm px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md transition-colors duration-200 font-medium"
+        className={classNames(
+          "w-full flex items-center gap-1 sm:gap-1.5 text-[8px] sm:text-[9px] md:text-[10px] px-1.5 sm:px-2 py-1 sm:py-1.5 rounded transition-colors duration-200 font-medium",
+          isDark 
+            ? "bg-blue-600 hover:bg-blue-500 text-white" 
+            : "bg-blue-50 hover:bg-blue-100 text-blue-700"
+        )}
         title="Reset view to show all zones"
       >
-        <Target size={14} />
+        <Target className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         <span>Show All Zones</span>
       </button>
     </div>
@@ -69,6 +88,7 @@ const ControlPanel: React.FC<{
 );
 
 const DispatchMapGoogle: React.FC = () => {
+  const { isDark } = useTheme();
   const { 
     drivers, 
     jobs, 
@@ -96,6 +116,35 @@ const DispatchMapGoogle: React.FC = () => {
   // Map instance
   const [map, setMap] = useState<google.maps.Map | null>(null);
   const [isGoogleLoaded, setIsGoogleLoaded] = useState(false);
+  const googleMaps =
+    typeof window !== "undefined" ? (window as any)?.google?.maps : null;
+
+  // 🌙 Dark mode map styles
+  const darkMapStyles: google.maps.MapTypeStyle[] = [
+    { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+    { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
+    { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
+    { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#263c3f" }] },
+    { featureType: "poi.park", elementType: "labels.text.fill", stylers: [{ color: "#6b9a76" }] },
+    { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+    { featureType: "road", elementType: "geometry", stylers: [{ color: "#38414e" }] },
+    { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#212a37" }] },
+    { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#9ca5b3" }] },
+    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#746855" }] },
+    { featureType: "road.highway", elementType: "geometry.stroke", stylers: [{ color: "#1f2835" }] },
+    { featureType: "road.highway", elementType: "labels.text.fill", stylers: [{ color: "#f3d19c" }] },
+    { featureType: "transit", elementType: "geometry", stylers: [{ color: "#2f3948" }] },
+    { featureType: "transit.station", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
+    { featureType: "water", elementType: "geometry", stylers: [{ color: "#17263c" }] },
+    { featureType: "water", elementType: "labels.text.fill", stylers: [{ color: "#515c6d" }] },
+    { featureType: "water", elementType: "labels.text.stroke", stylers: [{ color: "#17263c" }] },
+  ];
+
+  const lightMapStyles: google.maps.MapTypeStyle[] = [
+    { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
+  ];
 
   // 🗺️ Map Configuration with Enhanced Options
   const mapOptions: google.maps.MapOptions = useMemo(() => ({
@@ -107,13 +156,8 @@ const DispatchMapGoogle: React.FC = () => {
     streetViewControl: true,
     fullscreenControl: true,
     gestureHandling: 'greedy',
-    styles: [
-      {
-        featureType: 'poi.business',
-        stylers: [{ visibility: 'off' }],
-      },
-    ],
-  }), []);
+    styles: isDark ? darkMapStyles : lightMapStyles,
+  }), [isDark]);
 
   // 🎯 Map Center - ZONES ONLY (never drivers)
   const mapCenter = useMemo(() => {
@@ -144,60 +188,89 @@ const DispatchMapGoogle: React.FC = () => {
 
   // 📍 Job Markers & Routes - Show on hover or when creating/editing
   const jobMarkersAndRoute = useMemo(() => {
+    // Helper to safely get address string
+    const getAddressStr = (addr: any): string => {
+      if (!addr) return '';
+      if (typeof addr === 'string') return addr;
+      if (addr.address) return addr.address;
+      if (addr.formattedAddress) return addr.formattedAddress;
+      return '';
+    };
+    
     // Determine which job to show
-    let jobToShow = null;
+    let jobToShow: {
+      pickup: { lat: number; lng: number };
+      dropoff: { lat: number; lng: number } | null;
+      pickupAddress: string;
+      dropoffAddress: string | null;
+      routePath: any;
+      isDraft: boolean;
+    } | null = null;
     
     // Priority: Job draft (creating/editing) > Hovered job > Selected job
-    if (jobDraft?.pickup && jobDraft?.dropoff) {
+    if (jobDraft?.pickup) {
       console.log('📦 Showing draft job markers');
+      // Handle optional dropoff for drafts
+      const dropoffData = jobDraft.dropoff;
+      const hasDropoff = !!(dropoffData?.latitude && dropoffData?.longitude);
       jobToShow = {
         pickup: { lat: jobDraft.pickup.latitude, lng: jobDraft.pickup.longitude },
-        dropoff: { lat: jobDraft.dropoff.latitude, lng: jobDraft.dropoff.longitude },
+        dropoff: hasDropoff && dropoffData
+          ? { lat: dropoffData.latitude, lng: dropoffData.longitude }
+          : null,
         pickupAddress: jobDraft.pickup.address || 'Draft Pickup',
-        dropoffAddress: jobDraft.dropoff.address || 'Draft Dropoff',
-        routePath: jobDraft.routePath,
+        dropoffAddress: hasDropoff && dropoffData ? (dropoffData.address || 'Draft Dropoff') : null,
+        routePath: hasDropoff ? jobDraft.routePath : null,
         isDraft: true,
       };
     } else if (hoveredJobId || selectedJobId) {
       console.log('📦 Showing job markers for:', hoveredJobId || selectedJobId);
       const job = jobs.find(j => j.id === (hoveredJobId || selectedJobId));
       console.log('📦 Found job:', job);
-      if (job?.pickupLocation && job?.dropoffLocation) {
-        console.log('📦 Job has both locations, creating markers');
+      if (job?.pickupLocation) {
+        console.log('📦 Job has pickup location, creating markers');
+        // Handle optional dropoff
+        const dropoffLoc = job.dropoffLocation;
+        const hasDropoff = !!(dropoffLoc?.latitude && dropoffLoc?.longitude);
         jobToShow = {
           pickup: { lat: job.pickupLocation.latitude, lng: job.pickupLocation.longitude },
-          dropoff: { lat: job.dropoffLocation.latitude, lng: job.dropoffLocation.longitude },
-          pickupAddress: job.pickupAddress || 'Pickup',
-          dropoffAddress: job.dropoffAddress || 'Dropoff',
-          routePath: job.routePath,
+          dropoff: hasDropoff && dropoffLoc
+            ? { lat: dropoffLoc.latitude, lng: dropoffLoc.longitude }
+            : null,
+          pickupAddress: getAddressStr(job.pickupAddress) || 'Pickup',
+          dropoffAddress: hasDropoff ? (getAddressStr(job.dropoffAddress) || 'Dropoff') : null,
+          routePath: hasDropoff ? job.routePath : null,
           isDraft: false,
         };
       } else {
-        console.warn('⚠️ Job missing locations:', job);
+        console.warn('⚠️ Job missing pickup location:', job);
       }
     }
     
     if (!jobToShow) return null;
     
-    // Prepare route path (use routePath if available, otherwise straight line)
-    let routeCoordinates = [];
-    if (jobToShow.routePath && jobToShow.routePath.length >= 2) {
-      routeCoordinates = jobToShow.routePath.map((coord: any) => ({
-        lat: coord.latitude || coord.lat,
-        lng: coord.longitude || coord.lng,
-      }));
-    } else {
-      // Straight line between pickup and dropoff
-      routeCoordinates = [jobToShow.pickup, jobToShow.dropoff];
+    // Prepare route path (only if we have both pickup and dropoff)
+    let routeCoordinates: Array<{ lat: number; lng: number }> = [];
+    if (jobToShow.dropoff) {
+      if (jobToShow.routePath && jobToShow.routePath.length >= 2) {
+        routeCoordinates = jobToShow.routePath.map((coord: any) => ({
+          lat: coord.latitude || coord.lat,
+          lng: coord.longitude || coord.lng,
+        }));
+      } else {
+        // Straight line between pickup and dropoff
+        routeCoordinates = [jobToShow.pickup, jobToShow.dropoff];
+      }
     }
     
     return {
       pickup: jobToShow.pickup,
-      dropoff: jobToShow.dropoff,
+      dropoff: jobToShow.dropoff, // Can be null now
       pickupAddress: jobToShow.pickupAddress,
-      dropoffAddress: jobToShow.dropoffAddress,
+      dropoffAddress: jobToShow.dropoffAddress, // Can be null now
       route: routeCoordinates,
       isDraft: jobToShow.isDraft,
+      hasDropoff: !!jobToShow.dropoff,
     };
   }, [jobDraft, hoveredJobId, selectedJobId, jobs]);
 
@@ -218,6 +291,26 @@ const DispatchMapGoogle: React.FC = () => {
       }
       
       return hasPosition && isOnline;
+    });
+    
+    // ✅ FIX: Check for duplicate driver IDs
+    const driverIds = activeDrivers.map(d => d.id);
+    const uniqueIds = new Set(driverIds);
+    if (driverIds.length !== uniqueIds.size) {
+      console.error('❌ DUPLICATE DRIVER IDS DETECTED!', {
+        total: driverIds.length,
+        unique: uniqueIds.size,
+        duplicates: driverIds.filter((id, index) => driverIds.indexOf(id) !== index)
+      });
+    }
+    
+    // ✅ FIX: Log each driver's position to verify uniqueness
+    activeDrivers.forEach(d => {
+      console.log(`📍 Driver ${d.name} (${d.id}):`, {
+        lat: d.position?.latitude.toFixed(6),
+        lng: d.position?.longitude.toFixed(6),
+        status: d.status
+      });
     });
     
     console.log(`✅ ${activeDrivers.length} drivers with position and online status`);
@@ -333,20 +426,27 @@ const DispatchMapGoogle: React.FC = () => {
 
   // 🎯 Auto-focus on job markers when they appear
   useEffect(() => {
-    if (!map || !jobMarkersAndRoute || typeof google === 'undefined') return;
+    if (!map || !jobMarkersAndRoute || !googleMaps) return;
     
     console.log('🎯 Auto-focusing on job markers');
     
-    // Create bounds that include both pickup and dropoff
-    const bounds = new google.maps.LatLngBounds();
+    // Create bounds that include pickup and dropoff (if available)
+    const bounds = new googleMaps.LatLngBounds();
     bounds.extend(jobMarkersAndRoute.pickup);
-    bounds.extend(jobMarkersAndRoute.dropoff);
     
-    // Fit map to show both markers with padding
-    map.fitBounds(bounds, 80);
-    
-    console.log('✅ Job markers fitted in view');
-  }, [jobMarkersAndRoute, map]);
+    // Only include dropoff if it exists
+    if (jobMarkersAndRoute.dropoff) {
+      bounds.extend(jobMarkersAndRoute.dropoff);
+      // Fit map to show both markers with padding
+      map.fitBounds(bounds, 80);
+      console.log('✅ Job markers (pickup + dropoff) fitted in view');
+    } else {
+      // Just zoom to pickup location
+      map.panTo(jobMarkersAndRoute.pickup);
+      map.setZoom(15);
+      console.log('✅ Pickup marker focused (no dropoff)');
+    }
+  }, [jobMarkersAndRoute, map, googleMaps]);
 
   return (
     <div className="relative h-full w-full">
@@ -404,8 +504,8 @@ const DispatchMapGoogle: React.FC = () => {
             );
           })}
           
-          {/* Job Route Line */}
-          {jobMarkersAndRoute && (
+          {/* Job Route Line - Only show if we have both pickup and dropoff */}
+          {jobMarkersAndRoute?.hasDropoff && jobMarkersAndRoute.route.length >= 2 && (
             <Polyline
               path={jobMarkersAndRoute.route}
               options={{
@@ -418,17 +518,21 @@ const DispatchMapGoogle: React.FC = () => {
           )}
           
           {/* Job Pickup Marker */}
-          {jobMarkersAndRoute && (
+          {isGoogleLoaded && googleMaps && jobMarkersAndRoute && (
             <Marker
               position={jobMarkersAndRoute.pickup}
-              icon={{
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 12,
-                fillColor: jobMarkersAndRoute.isDraft ? '#c084fc' : '#bfdbfe', // Light purple for draft, light blue for regular
-                fillOpacity: 1,
-                strokeColor: jobMarkersAndRoute.isDraft ? '#7c3aed' : '#2563eb', // Darker purple/blue border
-                strokeWeight: 4,
-              }}
+              icon={
+                googleMaps
+                  ? {
+                      path: googleMaps.SymbolPath.CIRCLE,
+                      scale: 12,
+                      fillColor: jobMarkersAndRoute.isDraft ? '#c084fc' : '#bfdbfe',
+                      fillOpacity: 1,
+                      strokeColor: jobMarkersAndRoute.isDraft ? '#7c3aed' : '#2563eb',
+                      strokeWeight: 4,
+                    }
+                  : undefined
+              }
               title={`📍 ${jobMarkersAndRoute.pickupAddress}`}
               label={{
                 text: 'P',
@@ -439,19 +543,23 @@ const DispatchMapGoogle: React.FC = () => {
             />
           )}
           
-          {/* Job Dropoff Marker */}
-          {jobMarkersAndRoute && (
+          {/* Job Dropoff Marker - Only show if dropoff exists */}
+          {isGoogleLoaded && googleMaps && jobMarkersAndRoute && jobMarkersAndRoute.dropoff && (
             <Marker
               position={jobMarkersAndRoute.dropoff}
-              icon={{
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 12,
-                fillColor: jobMarkersAndRoute.isDraft ? '#d8b4fe' : '#bbf7d0', // Light purple for draft, light green for regular
-                fillOpacity: 1,
-                strokeColor: jobMarkersAndRoute.isDraft ? '#7c3aed' : '#059669', // Darker purple/green border
-                strokeWeight: 4,
-              }}
-              title={`🎯 ${jobMarkersAndRoute.dropoffAddress}`}
+              icon={
+                googleMaps
+                  ? {
+                      path: googleMaps.SymbolPath.CIRCLE,
+                      scale: 12,
+                      fillColor: jobMarkersAndRoute.isDraft ? '#d8b4fe' : '#bbf7d0',
+                      fillOpacity: 1,
+                      strokeColor: jobMarkersAndRoute.isDraft ? '#7c3aed' : '#059669',
+                      strokeWeight: 4,
+                    }
+                  : undefined
+              }
+              title={`🎯 ${jobMarkersAndRoute.dropoffAddress || 'Dropoff'}`}
               label={{
                 text: 'D',
                 color: '#ffffff',
@@ -461,99 +569,23 @@ const DispatchMapGoogle: React.FC = () => {
             />
           )}
           
-          {/* Driver Vehicle Markers */}
+          {/* Driver Vehicle Markers - Using SVG icons with status colors like old DispatchConsole */}
           {isGoogleLoaded && driversWithLocation.map((driver) => {
-            // Determine marker color based on driver status
-            let markerColor = '#94a3b8'; // Default gray
-            if (driver.status === 'AVAILABLE') markerColor = '#10b981'; // Green
-            else if (driver.status === 'BUSY') markerColor = '#f59e0b'; // Amber
-            else if (driver.status === 'ROGER') markerColor = '#3b82f6'; // Blue
-            else if (driver.status === 'AWAY') markerColor = '#6b7280'; // Gray
-            else if (driver.status === 'OFFLINE') markerColor = '#ef4444'; // Red
-            
             const isFocused = focusedDriverId === driver.id;
             
-            // Get vehicle type and icon from driver data
-            const vehicleType = driver.vehicleType?.toLowerCase() || 'sedan';
-            // @ts-ignore - vehicle property exists in API response
-            const customVehicleIcon = driver.vehicle?.icon;
+            // Get vehicle plate number for display
+            const plateNumber = typeof driver.vehicle === 'string' 
+              ? driver.vehicle 
+              : driver.vehicle?.plateNumber || '';
             
-            // Create vehicle icon URL - use custom icon from DB if available
-            const getVehicleIconUrl = (type: string) => {
-              // If custom icon exists from database, use it
-              if (customVehicleIcon) {
-                const apiUrl = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:3000';
-                const iconPath = customVehicleIcon.startsWith('/') ? customVehicleIcon : `/${customVehicleIcon}`;
-                return `${apiUrl}${iconPath}`;
-              }
-              
-              // Normalize vehicle type
-              const typeMap: Record<string, string> = {
-                'car': 'sedan',
-                'taxi': 'sedan', 
-                'sedan': 'sedan',
-                'suv': 'suv',
-                'van': 'van',
-                'truck': 'van',
-                'minivan': 'van',
-                'motorcycle': 'motorcycle',
-                'bike': 'motorcycle'
-              };
-              
-              const normalizedType = typeMap[type] || 'sedan';
-              
-              // Create SVG icon as data URL with color based on status
-              const vehicleSvgs: Record<string, string> = {
-                sedan: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-                  <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-                    <g transform="translate(24, 24)">
-                      <path d="M-14,-6 L-12,-10 L-8,-12 L8,-12 L12,-10 L14,-6 L14,6 L12,8 L-12,8 L-14,6 Z" 
-                            fill="${markerColor}" stroke="#fff" stroke-width="2"/>
-                      <circle cx="-8" cy="8" r="3" fill="#333"/>
-                      <circle cx="8" cy="8" r="3" fill="#333"/>
-                      <rect x="-10" y="-8" width="8" height="6" fill="#4a9eff" opacity="0.6"/>
-                      <rect x="2" y="-8" width="8" height="6" fill="#4a9eff" opacity="0.6"/>
-                    </g>
-                  </svg>
-                `)}`,
-                suv: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-                  <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-                    <g transform="translate(24, 24)">
-                      <path d="M-16,-8 L-14,-14 L-10,-16 L10,-16 L14,-14 L16,-8 L16,8 L14,10 L-14,10 L-16,8 Z" 
-                            fill="${markerColor}" stroke="#fff" stroke-width="2"/>
-                      <circle cx="-10" cy="10" r="3.5" fill="#333"/>
-                      <circle cx="10" cy="10" r="3.5" fill="#333"/>
-                      <rect x="-12" y="-12" width="10" height="8" fill="#4a9eff" opacity="0.6"/>
-                      <rect x="2" y="-12" width="10" height="8" fill="#4a9eff" opacity="0.6"/>
-                    </g>
-                  </svg>
-                `)}`,
-                van: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-                  <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-                    <g transform="translate(24, 24)">
-                      <rect x="-16" y="-14" width="32" height="26" rx="2" 
-                            fill="${markerColor}" stroke="#fff" stroke-width="2"/>
-                      <rect x="-14" y="-12" width="12" height="8" fill="#4a9eff" opacity="0.6"/>
-                      <rect x="2" y="-12" width="12" height="8" fill="#4a9eff" opacity="0.6"/>
-                      <circle cx="-10" cy="12" r="3" fill="#333"/>
-                      <circle cx="10" cy="12" r="3" fill="#333"/>
-                    </g>
-                  </svg>
-                `)}`,
-                motorcycle: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-                  <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-                    <g transform="translate(24, 24)">
-                      <circle cx="-8" cy="6" r="5" fill="#333" stroke="#fff" stroke-width="1.5"/>
-                      <circle cx="8" cy="6" r="5" fill="#333" stroke="#fff" stroke-width="1.5"/>
-                      <path d="M-8,6 L-4,-4 L4,-4 L8,6" fill="none" stroke="${markerColor}" stroke-width="3" stroke-linecap="round"/>
-                      <circle cx="0" cy="-8" r="3" fill="${markerColor}" stroke="#fff" stroke-width="1.5"/>
-                    </g>
-                  </svg>
-                `)}`,
-              };
-              
-              return vehicleSvgs[normalizedType] || vehicleSvgs.sedan;
-            };
+            // Get vehicle type for icon selection (car vs van)
+            const vehicleType = driver.vehicleType || 
+              (typeof driver.vehicle === 'object' ? driver.vehicle?.type : undefined) ||
+              'car';
+            
+            // Generate SVG data URL with status color (green/red/yellow/blue like old DispatchConsole)
+            // Now also passes vehicle type for car vs van icon selection
+            const vehicleIconUrl = getVehicleSvgDataUrl(driver.status, plateNumber, vehicleType);
             
             return (
               <Marker
@@ -563,18 +595,12 @@ const DispatchMapGoogle: React.FC = () => {
                   lng: driver.position!.longitude,
                 }}
                 icon={{
-                  url: getVehicleIconUrl(vehicleType),
-                  scaledSize: new google.maps.Size(isFocused ? 56 : 48, isFocused ? 56 : 48),
-                  anchor: new google.maps.Point(isFocused ? 28 : 24, isFocused ? 28 : 24),
+                  url: vehicleIconUrl,
+                  // Updated sizes for original car/van SVGs (60x30 aspect ratio)
+                  scaledSize: new google.maps.Size(isFocused ? 72 : 60, isFocused ? 36 : 30),
+                  anchor: new google.maps.Point(isFocused ? 36 : 30, isFocused ? 18 : 15),
                 }}
-                title={`${driver.name}\n${driver.vehicle || 'N/A'}\nType: ${vehicleType}\nStatus: ${driver.status}`}
-                label={{
-                  text: driver.vehicle?.slice(-3) || '?', // Last 3 chars of vehicle number
-                  color: '#ffffff',
-                  fontSize: '11px',
-                  fontWeight: 'bold',
-                  className: 'vehicle-marker-label'
-                }}
+                title={`${driver.name}\n${plateNumber || 'N/A'}\nStatus: ${normalizeDriverStatus(driver.status)}`}
               />
             );
           })}
@@ -586,6 +612,7 @@ const DispatchMapGoogle: React.FC = () => {
         mapState={mapState} 
         setMapState={setMapState} 
         onRecenterMap={handleRecenterMap}
+        isDark={isDark}
       />
       
       {/* Status Bar removed - zones only */}

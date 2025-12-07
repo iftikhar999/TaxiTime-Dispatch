@@ -1,7 +1,9 @@
 import { create } from "zustand";
+import { mergeDefined, nowIso } from "../utils/objectUtils";
 
 export type JobStatus =
   | "UNASSIGNED"
+  | "PENDING"
   | "OFFERED"
   | "ASSIGNED"
   | "REJECTED"
@@ -35,6 +37,34 @@ export interface DispatchJob {
   bags?: number;
   wheelchairs?: number;
   vehiclesNeeded?: number;
+  vehicleType?: string; // Added for dispatch job listing
+  vehicleTypeName?: string; // Display name for vehicle type
+  // Job source tracking
+  source?: 'DISPATCH' | 'WALKIN' | 'APP' | 'WEB' | 'PHONE';
+  // Waypoints/stops between pickup and dropoff
+  stops?: Array<{
+    address: string;
+    latitude?: number;
+    longitude?: number;
+    order: number;
+  }>;
+  // Walk-in job metadata
+  isWalkIn?: boolean;
+  createdBy?: string | null;
+  createdByDriver?: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    phone?: string;
+  } | null;
+  // Assigned driver information
+  assignedDriver?: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    phone?: string;
+    email?: string;
+  } | null;
   // Location coordinates
   pickupLat?: number;
   pickupLng?: number;
@@ -84,6 +114,13 @@ export interface DispatchJob {
     passengerName?: string;
     passengerPhone?: string;
     passengerEmail?: string;
+    // Waypoints/stops
+    stops?: Array<{
+      address: string;
+      latitude?: number;
+      longitude?: number;
+      order: number;
+    }>;
   };
   customer?: {
     id: string;
@@ -92,6 +129,36 @@ export interface DispatchJob {
     phone?: string;
     email?: string;
   };
+  // Status timeline for job history (ordered milestones emitted by backend)
+  statusTimeline?: Array<{
+    status: string;
+    timestamp: string;
+    duration?: string | null;
+    isLast?: boolean;
+  }>;
+  // Real-time pricing breakdown
+  fareBreakdown?: {
+    base?: number;
+    distance?: number;
+    waiting?: number;
+    surge?: number;
+    discount?: number;
+    total?: number;
+  };
+  rideMetrics?: {
+    estimatedDistance?: number | null;
+    estimatedDuration?: number | null;
+    actualDistance?: number | null;
+    actualDuration?: number | null;
+    estimatedPrice?: number | null;
+    actualFare?: number | null;
+    finalAmount?: number | null;
+  };
+  actualFare?: number;
+  finalAmount?: number;
+  lastUpdateAt?: string;
+  lastUpdateSource?: string;
+  needsHydration?: boolean;
 }
 
 export interface DispatchDriver {
@@ -129,6 +196,9 @@ export interface DispatchDriver {
   appState?: 'ACTIVE' | 'BACKGROUND' | 'INACTIVE';
   isMinimized?: boolean;
   isForeground?: boolean;
+  lastUpdateAt?: string;
+  lastUpdateSource?: string;
+  needsHydration?: boolean;
   appStateUpdatedAt?: string;
 }
 
@@ -152,6 +222,17 @@ export interface JobCounters {
   recalled: number;
 }
 
+// Notification types for dispatcher alerts
+export interface DispatchNotification {
+  id: string;
+  type: 'NOSHOW' | 'RECALLED' | 'URGENT' | 'INFO';
+  jobId: string;
+  jobReference: string;
+  message: string;
+  timestamp: string;
+  read: boolean;
+}
+
 export interface JobDraftLocation {
   address: string;
   latitude: number;
@@ -162,6 +243,20 @@ export interface JobDraft {
   pickup?: JobDraftLocation;
   dropoff?: JobDraftLocation;
   routePath?: Array<{ lat: number; lng: number }>;
+}
+
+type SessionDescriptionInit = {
+  type?: string;
+  sdp?: string;
+} | null;
+
+export interface DispatchVideoSession {
+  jobId: string;
+  driverId: string;
+  companyId?: string | null;
+  startedAt?: string | null;
+  offer?: SessionDescriptionInit;
+  viewerCount: number;
 }
 
 interface DispatchState {
@@ -190,6 +285,10 @@ interface DispatchState {
   hoveredJobId: string | null;
   hoveredDriverId: string | null;
   hoveredZoneId: string | null;
+  videoSessions: Record<string, DispatchVideoSession>;
+  // Notifications for dispatcher
+  notifications: DispatchNotification[];
+  unreadNotificationCount: number;
   setJobs: (jobs: DispatchJob[]) => void;
   setDrivers: (drivers: DispatchDriver[]) => void;
   setZones: (zones: DispatchZone[]) => void;
@@ -224,10 +323,17 @@ interface DispatchState {
     status?: string
   ) => Promise<void>;
   cancelJob: (jobId: string) => Promise<void>;
+  // Notification actions
+  addNotification: (notification: Omit<DispatchNotification, 'id' | 'timestamp' | 'read'>) => void;
+  markNotificationsAsRead: () => void;
+  clearNotifications: () => void;
   unassignJob: (jobId: string, reason?: string) => Promise<void>;
   editJob: (jobId: string, payload: any) => Promise<void>;
   updateJobDraft: (draft: Partial<JobDraft>) => void;
   clearJobDraft: () => void;
+  upsertVideoSession: (session: DispatchVideoSession) => void;
+  removeVideoSession: (jobId: string) => void;
+  updateVideoViewerCount: (jobId: string, viewerCount: number) => void;
 }
 
 export const useDispatchStore = create<DispatchState>((set, get) => ({
@@ -261,6 +367,10 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   hoveredJobId: null,
   hoveredDriverId: null,
   hoveredZoneId: null,
+  videoSessions: {},
+  // Notifications state
+  notifications: [],
+  unreadNotificationCount: 0,
   setJobs: (jobs) => {
     console.log("🔍 [Store] setJobs called with:", {
       totalJobs: jobs.length,
@@ -377,12 +487,26 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   setHoveredZoneId: (hoveredZoneId) => set({ hoveredZoneId }),
   upsertDriver: (driver) =>
     set((state) => {
+      const timestamp = driver.lastUpdateAt ?? nowIso();
+      const source = driver.lastUpdateSource ?? "store";
       const existingIndex = state.drivers.findIndex((d) => d.id === driver.id);
       if (existingIndex === -1) {
-        return { drivers: [...state.drivers, driver] };
+        return {
+          drivers: [
+            ...state.drivers,
+            {
+              ...driver,
+              lastUpdateAt: timestamp,
+              lastUpdateSource: source,
+            },
+          ],
+        };
       }
       const updated = [...state.drivers];
-      updated[existingIndex] = { ...updated[existingIndex], ...driver };
+      updated[existingIndex] = mergeDefined(updated[existingIndex], driver, {
+        lastUpdateAt: timestamp,
+        lastUpdateSource: source,
+      });
       return { drivers: updated };
     }),
   removeDriver: (driverId) =>
@@ -392,19 +516,39 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   updateDriverLocation: (driverId, position, locationUpdatedAt) =>
     set((state) => ({
       drivers: state.drivers.map((driver) =>
-        driver.id === driverId 
-          ? { ...driver, position, ...(locationUpdatedAt ? { locationUpdatedAt } : {}) } 
+        driver.id === driverId
+          ? mergeDefined(
+              driver,
+              {
+                position,
+                locationUpdatedAt: locationUpdatedAt ?? driver.locationUpdatedAt,
+              },
+              {
+                lastUpdateAt: locationUpdatedAt ?? nowIso(),
+                lastUpdateSource: "location",
+              }
+            )
           : driver
       ),
     })),
   updateJob: (job) =>
     set((state) => {
+      const timestamp = job.lastUpdateAt ?? nowIso();
+      const source = job.lastUpdateSource ?? "store";
       const existingIndex = state.jobs.findIndex((j) => j.id === job.id);
       if (existingIndex === -1) {
-        return { jobs: [...state.jobs, job] };
+        return {
+          jobs: [
+            ...state.jobs,
+            { ...job, lastUpdateAt: timestamp, lastUpdateSource: source },
+          ],
+        };
       }
       const updated = [...state.jobs];
-      updated[existingIndex] = { ...updated[existingIndex], ...job };
+      updated[existingIndex] = mergeDefined(updated[existingIndex], job, {
+        lastUpdateAt: timestamp,
+        lastUpdateSource: source,
+      });
       return { jobs: updated };
     }),
   createJob: async (payload: any) => {
@@ -471,6 +615,39 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
       return { jobDraft: nextDraft };
     }),
   clearJobDraft: () => set({ jobDraft: null }),
+  upsertVideoSession: (session) =>
+    set((state) => ({
+      videoSessions: {
+        ...state.videoSessions,
+        [session.jobId]: {
+          viewerCount: 0,
+          ...state.videoSessions[session.jobId],
+          ...session,
+        },
+      },
+    })),
+  removeVideoSession: (jobId) =>
+    set((state) => {
+      if (!state.videoSessions[jobId]) {
+        return {};
+      }
+      const next = { ...state.videoSessions };
+      delete next[jobId];
+      return { videoSessions: next };
+    }),
+  updateVideoViewerCount: (jobId, viewerCount) =>
+    set((state) => {
+      const existing = state.videoSessions[jobId];
+      if (!existing) {
+        return {};
+      }
+      return {
+        videoSessions: {
+          ...state.videoSessions,
+          [jobId]: { ...existing, viewerCount },
+        },
+      };
+    }),
   unassignJob: async (jobId: string, reason?: string) => {
     try {
       set({ loading: true, error: null });
@@ -559,5 +736,30 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
     } finally {
       set({ loading: false });
     }
+  },
+  
+  // Notification actions
+  addNotification: (notification) => {
+    const newNotification: DispatchNotification = {
+      ...notification,
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+    set((state) => ({
+      notifications: [newNotification, ...state.notifications].slice(0, 50), // Keep last 50
+      unreadNotificationCount: state.unreadNotificationCount + 1,
+    }));
+  },
+  
+  markNotificationsAsRead: () => {
+    set((state) => ({
+      notifications: state.notifications.map((n) => ({ ...n, read: true })),
+      unreadNotificationCount: 0,
+    }));
+  },
+  
+  clearNotifications: () => {
+    set({ notifications: [], unreadNotificationCount: 0 });
   },
 }));

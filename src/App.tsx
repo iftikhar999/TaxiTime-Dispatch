@@ -4,10 +4,11 @@ import LoginForm from "./components/auth/LoginForm";
 import DriverStatusPanel from "./components/drivers/DriverStatusPanel";
 import JobBoard from "./components/jobs/JobBoard";
 import JobComposerComplete from "./components/jobs/JobComposerComplete";
-import GridDispatchLayout from "./components/layout/GridDispatchLayout";
-import DispatchMapGoogle from "./components/map/DispatchMapGoogleSimple";
-import SocketTrafficMonitor from "./components/monitoring/SocketTrafficMonitor";
+import ResizableDispatchLayout from "./components/layout/ResizableDispatchLayout";
+import MapContainer from "./components/map/MapContainer";
+import { StateReconciliationWarning } from "./components/StateReconciliationWarning";
 import ZoneList from "./components/zones/ZoneList";
+import { ThemeProvider } from "./contexts/ThemeContext";
 import { useDispatchController } from "./hooks/useDispatchController";
 import { useDispatchSocket } from "./providers/SocketProvider";
 import { authService } from "./services/authService";
@@ -160,7 +161,7 @@ const App: React.FC = () => {
   const companyName = dispatcher?.companyId ?? user.companyId ?? "Company";
 
   return (
-    <>
+    <ThemeProvider>
       <Toaster
         position="top-right"
         toastOptions={{
@@ -185,10 +186,11 @@ const App: React.FC = () => {
         }}
       />
 
-      {/* Socket Traffic Monitor - Real-time socket event monitoring */}
-      <SocketTrafficMonitor />
+      {/* Socket Traffic Monitor - Hidden for cleaner UI */}
+      {/* <SocketTrafficMonitor /> */}
+      <StateReconciliationWarning />
 
-      <GridDispatchLayout
+      <ResizableDispatchLayout
         dispatcherName={dispatcherName}
         companyName={companyName}
         onLogout={handleLogout}
@@ -197,28 +199,10 @@ const App: React.FC = () => {
           onEditJob={handleEditJob}
         />}
         map={
-          <div className="flex h-full flex-col">
-            <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600">
-              <span>Socket: {connected ? "Connected" : "Disconnected"}</span>
-              <span
-                className={
-                  error ? "text-rose-600" : loading ? "text-amber-600" : ""
-                }
-              >
-                {error
-                  ? `Error: ${error}`
-                  : loading
-                  ? "Syncing..."
-                  : "Live updates"}
-              </span>
-            </div>
-            <div className="flex-1">
-              <DispatchMapGoogle 
-                showJobCreation={showJobCreation}
-                editJobData={editJobData}
-              />
-            </div>
-          </div>
+          <MapContainer 
+            showJobCreation={showJobCreation}
+            editJobData={editJobData}
+          />
         }
         driverList={<DriverStatusPanel />}
         zoneList={<ZoneList />}
@@ -234,7 +218,7 @@ const App: React.FC = () => {
         showJobCreation={showJobCreation}
         onCloseJobCreation={handleCloseJobCreation}
       />
-    </>
+    </ThemeProvider>
   );
 };
 

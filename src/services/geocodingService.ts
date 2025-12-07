@@ -33,7 +33,7 @@ export interface DistanceResult {
   destination: { lat: number; lng: number };
 }
 
-const GOOGLE_MAPS_API_KEY =
+const getGoogleMapsApiKey = () =>
   import.meta.env.VITE_GOOGLE_MAPS_API_KEY ||
   import.meta.env.VITE_GOOGLE_MAP_API_KEY ||
   "";
@@ -43,21 +43,31 @@ const GOOGLE_PROVIDER: PlaceProvider = "GOOGLE_MAPS";
 const OSM_PROVIDER: PlaceProvider = "OPENSTREETMAP";
 const DEFAULT_COUNTRY_RESTRICTION = undefined;
 
-const isBrowser = typeof globalThis !== "undefined" && typeof globalThis.window !== "undefined";
+const isBrowserEnvironment = () =>
+  typeof globalThis !== "undefined" &&
+  (typeof (globalThis as any).window !== "undefined" ||
+    typeof (globalThis as any).document !== "undefined" ||
+    !!(globalThis as any).navigator ||
+    !!(globalThis as any).google);
 
 const getGoogleMaps = async (): Promise<any> => {
-  if (!isBrowser) {
-    throw new Error("Not in browser environment");
+  const globalRef = globalThis as any;
+
+  if (globalRef?.google?.maps) {
+    return globalRef.google.maps;
   }
 
-  if ((globalThis as any)?.google?.maps?.places) {
-    return (globalThis as any).google.maps;
+  if (!isBrowserEnvironment() && !globalRef?.googleMapsLoadPromise) {
+    throw new Error("Google Maps API not available");
   }
 
-  if ((globalThis as any).googleMapsLoadPromise) {
+  if (globalRef?.googleMapsLoadPromise) {
     try {
-      await (globalThis as any).googleMapsLoadPromise;
-      return (globalThis as any).google.maps;
+      await globalRef.googleMapsLoadPromise;
+      if (globalRef?.google?.maps) {
+        return globalRef.google.maps;
+      }
+      throw new Error("Google Maps API not available");
     } catch (error) {
       console.error("Google Maps loading failed:", error);
       throw error;
@@ -67,13 +77,25 @@ const getGoogleMaps = async (): Promise<any> => {
   throw new Error("Google Maps API not available");
 };
 
-const isGoogleMapsAvailable = async (): Promise<boolean> => {
-  try {
-    const gmaps = await getGoogleMaps();
-    return Boolean(gmaps?.places);
-  } catch {
-    return false;
+const instantiateGoogleService = <T>(Ctor: any, ...args: any[]): T => {
+  if (typeof Ctor !== "function") {
+    throw new Error("Google Maps constructor is unavailable");
   }
+
+  const hasPrototype = Boolean(Ctor.prototype);
+  if (hasPrototype) {
+    try {
+      return new Ctor(...args);
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error ?? "");
+      if (!/not a constructor/i.test(message)) {
+        throw error;
+      }
+      // Fall through to invoke without `new` for mocked functions
+    }
+  }
+
+  return Ctor(...args);
 };
 
 type SuggestionOptions = {
@@ -91,8 +113,8 @@ export async function getLocationSuggestions(
     query, 
     provider, 
     options,
-    apiKeyExists: Boolean(GOOGLE_MAPS_API_KEY),
-    isBrowser
+    apiKeyExists: Boolean(getGoogleMapsApiKey()),
+    isBrowser: isBrowserEnvironment()
   });
   
   if (!query || query.trim().length < 3) {
@@ -103,25 +125,28 @@ export async function getLocationSuggestions(
   if (provider === GOOGLE_PROVIDER) {
     console.log("[GeocodingService] Attempting Google Places API...");
     
-    if (!GOOGLE_MAPS_API_KEY) {
+    if (!getGoogleMapsApiKey()) {
       console.error("[GeocodingService] No Google Maps API key found");
       return getOpenStreetMapSuggestions(query, options);
     }
 
     try {
-      const isAvailable = await isGoogleMapsAvailable();
-      console.log("[GeocodingService] Google Maps availability:", isAvailable);
-      
-      if (!isAvailable) {
-        console.warn("[GeocodingService] Google Maps not available, falling back to OpenStreetMap");
+      const gmaps = await getGoogleMaps();
+      if (!gmaps?.places?.AutocompleteService) {
+        console.warn("[GeocodingService] AutocompleteService missing, falling back to OpenStreetMap");
         return getOpenStreetMapSuggestions(query, options);
       }
 
-      const gmaps = await getGoogleMaps();
       console.log("[GeocodingService] Google Maps loaded successfully");
       
-      const service = new gmaps.places.AutocompleteService();
-      const sessionToken = options.sessionToken ?? new gmaps.places.AutocompleteSessionToken();
+      const service = instantiateGoogleService<any>(
+        gmaps.places.AutocompleteService
+      );
+      const sessionToken =
+        options.sessionToken ??
+        instantiateGoogleService<any>(
+          gmaps.places.AutocompleteSessionToken
+        );
 
       return await new Promise<LocationSuggestion[]>((resolve, reject) => {
         console.log("[GeocodingService] Making Google Places API call...");
@@ -165,6 +190,12 @@ export async function getLocationSuggestions(
         });
       });
     } catch (error) {
+      if ((import.meta.env?.MODE ?? "").toLowerCase() === "test") {
+        console.info("[GeocodingService][TEST] Google suggestions failed:", error);
+      }
+      console.warn(
+        "[GeocodingService] Google Maps not available, falling back to OpenStreetMap"
+      );
       console.error("[GeocodingService] Google Places error:", error);
       return getOpenStreetMapSuggestions(query, options);
     }
@@ -233,19 +264,25 @@ export async function getPlaceDetails(
 
   if (provider === GOOGLE_PROVIDER) {
     try {
-      const isAvailable = await isGoogleMapsAvailable();
-      if (!isAvailable) {
-        console.warn("[GeocodingService] Google Maps not available for place details");
-        return getMockPlaceDetails(input);
-      }
-
       const placeId = typeof input === "string" ? input : input.placeId || input.id;
       if (!placeId) {
         throw new Error("Place ID is required for Google place details");
       }
 
       const gmaps = await getGoogleMaps();
-      const service = new gmaps.places.PlacesService(document.createElement("div"));
+      if (!gmaps?.places?.PlacesService) {
+        console.warn("[GeocodingService] PlacesService missing, returning mock details");
+        return getMockPlaceDetails(input);
+      }
+
+      const placesContainer =
+        typeof document !== "undefined"
+          ? document.createElement("div")
+          : ({} as HTMLDivElement);
+      const service = instantiateGoogleService<any>(
+        gmaps.places.PlacesService,
+        placesContainer
+      );
 
       return await new Promise<PlaceDetails>((resolve, reject) => {
         service.getDetails(
@@ -271,6 +308,9 @@ export async function getPlaceDetails(
         );
       });
     } catch (error) {
+      if ((import.meta.env?.MODE ?? "").toLowerCase() === "test") {
+        console.info("[GeocodingService][TEST] Google place details failed:", error);
+      }
       console.error("[GeocodingService] Google place details error:", error);
       return getMockPlaceDetails(input);
     }
@@ -295,19 +335,33 @@ export async function calculateDistance(
   destination: { lat: number; lng: number }
 ): Promise<DistanceResult> {
   try {
-    const isAvailable = await isGoogleMapsAvailable();
-    if (!isAvailable) {
+    const gmaps = await getGoogleMaps();
+    if (!gmaps?.DistanceMatrixService) {
+      console.warn("[GeocodingService] DistanceMatrixService missing, using haversine fallback");
       return calculateHaversineDistance(origin, destination);
     }
 
-    const gmaps = await getGoogleMaps();
-    const service = new gmaps.DistanceMatrixService();
+    const service = instantiateGoogleService<any>(
+      gmaps.DistanceMatrixService
+    );
 
     return await new Promise<DistanceResult>((resolve, reject) => {
       service.getDistanceMatrix(
         {
-          origins: [new gmaps.LatLng(origin.lat, origin.lng)],
-          destinations: [new gmaps.LatLng(destination.lat, destination.lng)],
+          origins: [
+            instantiateGoogleService<any>(
+              gmaps.LatLng,
+              origin.lat,
+              origin.lng
+            ),
+          ],
+          destinations: [
+            instantiateGoogleService<any>(
+              gmaps.LatLng,
+              destination.lat,
+              destination.lng
+            ),
+          ],
           travelMode: gmaps.TravelMode.DRIVING,
         },
         (response: any, status: string) => {
@@ -331,6 +385,9 @@ export async function calculateDistance(
       );
     });
   } catch (error) {
+    if ((import.meta.env?.MODE ?? "").toLowerCase() === "test") {
+      console.info("[GeocodingService][TEST] Distance matrix failed:", error);
+    }
     console.error("[GeocodingService] Distance calculation error:", error);
     return calculateHaversineDistance(origin, destination);
   }

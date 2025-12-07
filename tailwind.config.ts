@@ -1,8 +1,9 @@
-import type { Config } from 'tailwindcss';
 import withMT from '@material-tailwind/react/utils/withMT';
+import type { Config } from 'tailwindcss';
 
 export default withMT({
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {
@@ -17,6 +18,10 @@ export default withMT({
           700: '#1345b4',
           800: '#0c2f82',
           900: '#061c52'
+        },
+        gray: {
+          750: '#2d3748',
+          850: '#1a202c',
         }
       }
     }

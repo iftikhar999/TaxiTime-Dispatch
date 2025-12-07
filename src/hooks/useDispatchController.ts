@@ -1662,6 +1662,25 @@ export const useDispatchController = () => {
         `[Dispatch] Job ${updatedJob.id} progress: ${status} (driver: ${nextDriverId ?? "n/a"})`
       );
 
+      // ✅ FIX: Clear driver's currentJobId when job is finished/cancelled/etc
+      if (resetDriverStatuses.has(status) && existingJob.driverId) {
+        const drivers = useDispatchStore.getState().drivers;
+        const driverToUpdate = drivers.find(d => d.id === existingJob.driverId);
+        if (driverToUpdate && driverToUpdate.currentJobId === existingJob.id) {
+          console.log(
+            `[Dispatch] 🔄 Clearing currentJobId for driver ${driverToUpdate.name} (job ${status})`
+          );
+          // ✅ FIX: Set driver to AVAILABLE for all job-ending statuses, not just FINISHED
+          upsertDriver({
+            ...driverToUpdate,
+            currentJobId: undefined,
+            status: "AVAILABLE",
+            lastUpdateAt: payload.timestamp ?? nowIso(),
+            lastUpdateSource: "socket:job:progress:driver-clear",
+          });
+        }
+      }
+
       if (status === "RECALLED" || status === "NOSHOW") {
         const label =
           existingJob.reference ||
@@ -1675,6 +1694,16 @@ export const useDispatchController = () => {
         toast(message, {
           icon: status === "RECALLED" ? "↩️" : "🚫",
         });
+        
+        // ✅ Add notification for NO-SHOW and RECALLED jobs
+        const { addNotification } = useDispatchStore.getState();
+        addNotification({
+          type: status === "RECALLED" ? "RECALLED" : "NOSHOW",
+          message,
+          jobId: existingJob.id,
+          jobReference: existingJob.reference,
+        });
+        
         fetchZones();
       }
     };
@@ -1855,6 +1884,8 @@ export const useDispatchController = () => {
       socket.on("job:progress:updated", handleJobProgressUpdated);
       socket.on("job:recalled", handleJobProgressUpdated); // ✅ NEW: Handle recalled jobs
       socket.on("job:noshow", handleJobProgressUpdated); // ✅ NEW: Handle no-show jobs
+      socket.on("job:rejected", handleJobProgressUpdated); // ✅ NEW: Handle driver rejected job
+      socket.on("job:accepted", handleJobProgressUpdated); // ✅ NEW: Handle driver accepted job
       socket.on("job:updated", handleJobDataUpdated); // ✅ NEW: Generic job updates
       socket.on("meter:telemetry:update", handleMeterTelemetryUpdate);
       socket.on("ride:created", handleRideCreated);
@@ -1876,6 +1907,8 @@ export const useDispatchController = () => {
       socket.off("job:progress:updated", handleJobProgressUpdated);
       socket.off("job:recalled", handleJobProgressUpdated); // ✅ NEW: Cleanup
       socket.off("job:noshow", handleJobProgressUpdated); // ✅ NEW: Cleanup
+      socket.off("job:rejected", handleJobProgressUpdated); // ✅ NEW: Cleanup
+      socket.off("job:accepted", handleJobProgressUpdated); // ✅ NEW: Cleanup
       socket.off("job:updated", handleJobDataUpdated); // ✅ NEW: Cleanup
       socket.off("meter:telemetry:update", handleMeterTelemetryUpdate);
       socket.off("ride:created", handleRideCreated);

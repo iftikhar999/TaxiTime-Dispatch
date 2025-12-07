@@ -36,10 +36,12 @@ export interface ZoneDetectionResult {
   defaultTariff: ZoneTariff | null;
 }
 
+const BOUNDARY_TOLERANCE_KM = 0.05; // Allow 50m tolerance for boundary checks
+
 /**
  * Check if a point is inside a circle zone
  */
-const isPointInCircle = (
+export const isPointInCircle = (
   point: { lat: number; lng: number },
   center: { lat: number; lng: number },
   radiusKm: number
@@ -58,13 +60,13 @@ const isPointInCircle = (
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   const distance = R * c;
 
-  return distance <= radiusKm;
+  return distance <= radiusKm + BOUNDARY_TOLERANCE_KM;
 };
 
 /**
  * Check if a point is inside a polygon zone using ray casting algorithm
  */
-const isPointInPolygon = (
+export const isPointInPolygon = (
   point: { lat: number; lng: number },
   polygon: Array<{ lat: number; lng: number }>
 ): boolean => {
@@ -87,7 +89,7 @@ const isPointInPolygon = (
 /**
  * Check if a point is inside a rectangle zone
  */
-const isPointInRectangle = (
+export const isPointInRectangle = (
   point: { lat: number; lng: number },
   bounds: {
     north: number;
@@ -120,7 +122,7 @@ export const detectZone = async (
 ): Promise<ZoneDetectionResult> => {
   try {
     // Call backend API to detect zone
-    const response = await api.get("/dispatch/zones/detect", {
+    const response = await api.get("/api/dispatch/zones/detect", {
       params: { lat, lng },
     });
 
@@ -130,7 +132,7 @@ export const detectZone = async (
 
     // Fallback: Try client-side detection if backend fails
     try {
-      const zonesResponse = await api.get("/dispatch/zones");
+      const zonesResponse = await api.get("/api/dispatch/zones");
       const zones: Zone[] = zonesResponse.data.zones || [];
 
       const point = { lat, lng };
@@ -171,7 +173,7 @@ export const detectZone = async (
         if (isInside) {
           // Fetch tariffs for this zone
           const tariffsResponse = await api.get(
-            `/dispatch/zones/${zone.id}/tariffs`
+            `/api/dispatch/zones/${zone.id}/tariffs`
           );
           const tariffs: ZoneTariff[] = tariffsResponse.data.tariffs || [];
           const defaultTariff =
@@ -203,7 +205,7 @@ export const detectZone = async (
  */
 export const getActiveZones = async (): Promise<Zone[]> => {
   try {
-    const response = await api.get("/dispatch/zones", {
+    const response = await api.get("/api/dispatch/zones", {
       params: { active: true },
     });
     return response.data.zones || [];
@@ -218,7 +220,7 @@ export const getActiveZones = async (): Promise<Zone[]> => {
  */
 export const getZoneTariffs = async (zoneId: string): Promise<ZoneTariff[]> => {
   try {
-    const response = await api.get(`/dispatch/zones/${zoneId}/tariffs`);
+    const response = await api.get(`/api/dispatch/zones/${zoneId}/tariffs`);
     return response.data.tariffs || [];
   } catch (error) {
     console.error(`Failed to fetch tariffs for zone ${zoneId}:`, error);
@@ -270,7 +272,7 @@ export const validateVehicleZone = async (
 }> => {
   try {
     const response = await api.get(
-      `/dispatch/vehicles/${vehicleId}/zones/${zoneId}/validate`
+      `/api/dispatch/vehicles/${vehicleId}/zones/${zoneId}/validate`
     );
     return response.data;
   } catch (error) {

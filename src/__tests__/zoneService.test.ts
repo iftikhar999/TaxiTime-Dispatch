@@ -84,7 +84,7 @@ describe("Zone Detection Algorithms", () => {
     });
 
     it("should NOT detect point in L-shape cutout", () => {
-      const point = { lat: 40.708, lng: -74.008 }; // In cutout area
+      const point = { lat: 40.708, lng: -74.003 }; // In cutout area (east of inner column)
       const result = isPointInPolygon(point, lShapePolygon);
       expect(result).toBe(false);
     });

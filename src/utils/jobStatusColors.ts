@@ -16,14 +16,14 @@ export const JOB_STATUS_COLORS = {
   ON_THE_WAY: "#FCA5A5", // 🔴 Light Red - Driver heading to pickup
   ARRIVED: "#FCA5A5", // 🔴 Light Red - Driver arrived
   
-  // Active (Red)
-  STARTED: "#EF4444", // 🔴 Red - Ride started
-  ACTIVE: "#EF4444", // 🔴 Red - Ride in progress
-  REACHED: "#EF4444", // 🔴 Red - Reached dropoff
+  // Active (Blue)
+  STARTED: "#93C5FD", // 🔵 Light Blue - Ride started
+  ACTIVE: "#60A5FA", // 🔵 Medium Blue - Ride in progress
+  REACHED: "#60A5FA", // 🔵 Medium Blue - Reached dropoff
   
   // Completed (Golden)
-  COMPLETED: "#FCD34D", // ✨ Golden - Successfully completed
-  FINISHED: "#FCD34D", // ✨ Golden - Finished
+  COMPLETED: "#E2E8F0", // ✨ Light Slate - Successfully completed
+  FINISHED: "#E2E8F0", // ✨ Light Slate - Finished
   
   // Failed States (Red)
   REJECTED: "#EF4444", // 🔴 Red - Driver rejected
@@ -81,13 +81,13 @@ export const getJobStatusBadgeClass = (
     ARRIVED: "bg-red-100 text-red-600 border-red-200",
     
     // Red - Active
-    STARTED: "bg-red-50 text-red-700 border-red-300",
-    ACTIVE: "bg-red-50 text-red-700 border-red-300",
-    REACHED: "bg-red-50 text-red-700 border-red-300",
+    STARTED: "bg-blue-50 text-blue-700 border-blue-200",
+    ACTIVE: "bg-blue-100 text-blue-700 border-blue-300",
+    REACHED: "bg-blue-100 text-blue-700 border-blue-300",
     
     // Golden - Completed
-    COMPLETED: "bg-yellow-50 text-yellow-700 border-yellow-300",
-    FINISHED: "bg-yellow-50 text-yellow-700 border-yellow-300",
+  COMPLETED: "bg-slate-50 text-slate-700 border-slate-200",
+  FINISHED: "bg-slate-50 text-slate-700 border-slate-200",
     
     // Red - Failed
     REJECTED: "bg-red-50 text-red-700 border-red-300",
@@ -139,4 +139,3 @@ export const getJobStatusWithIcon = (
 
   return iconMap[upperStatus] || "❓ Unknown";
 };
-

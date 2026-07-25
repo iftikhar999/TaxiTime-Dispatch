@@ -19,22 +19,12 @@ const ConfirmAssignmentModal: React.FC<ConfirmAssignmentModalProps> = ({
   jobReference,
 }) => {
   const { isDark } = useTheme();
-  
-  console.log("🔔 ConfirmAssignmentModal render:", {
-    isOpen,
-    driverName,
-    jobReference,
-  });
 
   if (!isOpen) {
-    console.log("❌ Modal not open, returning null");
     return null;
   }
 
-  console.log("✅ Modal is open, rendering...");
-
   const handleConfirm = () => {
-    console.log("👍 Confirm clicked");
     onConfirm();
     onClose();
   };
@@ -115,4 +105,6 @@ const ConfirmAssignmentModal: React.FC<ConfirmAssignmentModalProps> = ({
   );
 };
 
-export default ConfirmAssignmentModal;
+// Memoize so parent re-renders (e.g. driver location ticks every 5s) don't
+// re-render the modal subtree when its props are unchanged.
+export default React.memo(ConfirmAssignmentModal);

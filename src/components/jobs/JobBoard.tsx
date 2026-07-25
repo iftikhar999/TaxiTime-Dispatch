@@ -1,31 +1,50 @@
 import classNames from "classnames";
 import {
+    Accessibility,
     AlertCircle,
+    Briefcase,
     Calendar,
+    CheckSquare,
     ChevronDown,
     ChevronRight,
     Clock,
+    CreditCard,
+    Download,
+    Eye,
     Filter,
     Grip,
     MapPin,
     MoreHorizontal,
+    Pencil,
     Phone,
     Plus,
     RotateCcw,
     Search,
     Send,
+    Settings,
+    Square,
+    Timer,
     User,
     UserCircle,
     Users,
     X
 } from "lucide-react";
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useDispatchController } from "../../hooks/useDispatchController";
+import { useDispatchSocket } from "../../providers/SocketProvider";
 import { cancelJob } from "../../services/jobService";
 import { JobStatus, useDispatchStore } from "../../store/useDispatchStore";
 import { isAssignableJobStatus } from "../../utils/jobStatusHelpers";
+import {
+    formatOverSec,
+    jobSlaOverSec,
+    loadSlaThresholds,
+    type SlaThresholds,
+} from "../../utils/slaThresholds";
+import ServiceTypeSelector from "../v2/ServiceTypeSelector";
+import SlaSettingsModal from "../settings/SlaSettingsModal";
 import ConfirmAssignmentModal from "./ConfirmAssignmentModal";
 import JobDetailsModal from "./JobDetailsModal";
 
@@ -51,6 +70,11 @@ const canCancelJob = (status: JobStatus): boolean => {
 // Jobs that can be recalled (taken back from driver)
 const canRecallJob = (status: JobStatus): boolean => {
   return status === "OFFERED" || status === "ASSIGNED";
+};
+
+// Jobs that can be edited — not active, finished, cancelled, or noshow
+const canEditJob = (status: JobStatus): boolean => {
+  return status !== "ACTIVE" && status !== "FINISHED" && status !== "CANCELLED" && status !== "NOSHOW";
 };
 
 const isNowJob = (job: any): boolean => {
@@ -199,6 +223,12 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
   const selectJob = useDispatchStore((state) => state.selectJob);
   const selectedStatus = useDispatchStore((state) => state.selectedStatus);
   const setSelectedStatus = useDispatchStore((state) => state.setSelectedStatus);
+  const selectedServiceType = useDispatchStore(
+    (state) => state.selectedServiceType
+  );
+  const setSelectedServiceType = useDispatchStore(
+    (state) => state.setSelectedServiceType
+  );
   const jobCounters = useDispatchStore((state) => state.jobCounters);
   const loading = useDispatchStore((state) => state.loading);
   const drivers = useDispatchStore((state) => state.drivers);
@@ -207,7 +237,31 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
   const setHoveredJobId = useDispatchStore((state) => state.setHoveredJobId);
   
   const { fetchJobs, fetchJobCounters } = useDispatchController();
+  const { socket, connected: socketConnected } = useDispatchSocket();
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Live job lifecycle listeners. The dispatch-store socket listeners in
+  // useDispatchController already pick up many of these, but we want the
+  // board to refetch counters + list so grouping and badges stay honest
+  // without relying on polling.
+  React.useEffect(() => {
+    if (!socket) return;
+    const handleLifecycle = (payload: any) => {
+      console.log("[JobBoard] job lifecycle event", payload);
+      fetchJobs();
+      fetchJobCounters();
+    };
+    socket.on("job:assigned", handleLifecycle);
+    socket.on("job:status", handleLifecycle);
+    socket.on("job:cancelled", handleLifecycle);
+    socket.on("job:completed", handleLifecycle);
+    return () => {
+      socket.off("job:assigned", handleLifecycle);
+      socket.off("job:status", handleLifecycle);
+      socket.off("job:cancelled", handleLifecycle);
+      socket.off("job:completed", handleLifecycle);
+    };
+  }, [socket, fetchJobs, fetchJobCounters]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [showFilters, setShowFilters] = useState(false);
@@ -222,6 +276,50 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
     return () => clearInterval(tickInterval);
   }, []);
 
+  // 1-second tick while any OFFERED job is on the board so the "Offered → X
+  // · Ns" countdown actually decreases in real time. Stays idle otherwise so
+  // we're not re-rendering the board every second on a quiet shift.
+  const hasPendingOffer = React.useMemo(
+    () => jobs.some((j: any) => j.status === 'OFFERED' && j.offerExpiresAt),
+    [jobs],
+  );
+  React.useEffect(() => {
+    if (!hasPendingOffer) return undefined;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [hasPendingOffer]);
+
+  // Fetch jobs when service type changes
+  React.useEffect(() => {
+    fetchJobs();
+  }, [selectedServiceType, fetchJobs]);
+
+  // Bulletproof initial load. The first fetch on mount races auth hydration
+  // and socket handshake; under live latency we sometimes get a stale/empty
+  // result and the dispatcher has to switch tabs to see their jobs. Retry
+  // once on socket connect, and one more time if the list is still empty a
+  // second later. Cheap and idempotent.
+  const hasInitialLoaded = useRef(false);
+  React.useEffect(() => {
+    if (!socketConnected) return;
+    fetchJobs();
+    fetchJobCounters();
+  }, [socketConnected, fetchJobs, fetchJobCounters]);
+  React.useEffect(() => {
+    if (hasInitialLoaded.current) return;
+    if (jobs.length > 0) {
+      hasInitialLoaded.current = true;
+      return;
+    }
+    const t = setTimeout(() => {
+      if (!hasInitialLoaded.current) {
+        fetchJobs();
+        fetchJobCounters();
+      }
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [jobs.length, fetchJobs, fetchJobCounters]);
+
   React.useEffect(() => {
     const interval = setInterval(() => {
       for (const job of jobs) {
@@ -230,7 +328,31 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
         if (urgency.isNow && urgency.isLate && !alertedRef.current.has(job.id + '_now_late')) {
           alertedRef.current.add(job.id + '_now_late');
           playLateJobSound();
-          toast.error(`🚨 NOW Job ${job.reference} is LATE! (${urgency.lateMinutes}m overdue)`, { duration: 10000 });
+          toast.error(
+            (t) => (
+              <div className="flex flex-col gap-2" style={{ minWidth: '260px' }}>
+                <span className="text-sm font-medium">🚨 NOW Job {job.reference} is LATE! ({urgency.lateMinutes}m overdue)</span>
+                <div className="flex gap-2">
+                  <button
+                    className="flex-1 px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+                    onClick={() => {
+                      toast.dismiss(t.id);
+                      cancelJob(job.id, 'Late job cancelled from alert').then(() => {
+                        toast.success(`Job ${job.reference} cancelled`);
+                        fetchJobs();
+                        fetchJobCounters();
+                      }).catch(() => toast.error('Failed to cancel job'));
+                    }}
+                  >Cancel Job</button>
+                  <button
+                    className="flex-1 px-3 py-1.5 text-xs font-semibold bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition-colors border border-gray-300"
+                    onClick={() => toast.dismiss(t.id)}
+                  >Dismiss</button>
+                </div>
+              </div>
+            ),
+            { duration: 30000 }
+          );
         }
         if (!urgency.isNow && urgency.urgencyLevel === 'WARNING' && !alertedRef.current.has(job.id + '_warning')) {
           alertedRef.current.add(job.id + '_warning');
@@ -239,24 +361,131 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
         if (!urgency.isNow && urgency.isLate && !alertedRef.current.has(job.id + '_sched_late')) {
           alertedRef.current.add(job.id + '_sched_late');
           playLateJobSound();
-          toast.error(`🚨 Scheduled Job ${job.reference} is now LATE! (${urgency.lateMinutes}m past scheduled time)`, { duration: 10000 });
+          toast.error(
+            (t) => (
+              <div className="flex flex-col gap-2" style={{ minWidth: '260px' }}>
+                <span className="text-sm font-medium">🚨 Scheduled Job {job.reference} is now LATE! ({urgency.lateMinutes}m past scheduled time)</span>
+                <div className="flex gap-2">
+                  <button
+                    className="flex-1 px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+                    onClick={() => {
+                      toast.dismiss(t.id);
+                      cancelJob(job.id, 'Late scheduled job cancelled from alert').then(() => {
+                        toast.success(`Job ${job.reference} cancelled`);
+                        fetchJobs();
+                        fetchJobCounters();
+                      }).catch(() => toast.error('Failed to cancel job'));
+                    }}
+                  >Cancel Job</button>
+                  <button
+                    className="flex-1 px-3 py-1.5 text-xs font-semibold bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition-colors border border-gray-300"
+                    onClick={() => toast.dismiss(t.id)}
+                  >Dismiss</button>
+                </div>
+              </div>
+            ),
+            { duration: 30000 }
+          );
         }
       }
     }, 30000);
     return () => clearInterval(interval);
-  }, [jobs]);
+  }, [jobs, fetchJobs, fetchJobCounters]);
 
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [pendingAssignment, setPendingAssignment] = useState<{ jobId: string; driverId: string; driverName: string; jobReference: string } | null>(null);
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
 
+  // Wave 2D — SLA + bulk ops
+  const [slaThresholds, setSlaThresholds] = useState<SlaThresholds>(() => loadSlaThresholds());
+  const [slaOnlyFilter, setSlaOnlyFilter] = useState(false);
+  const [showSlaSettings, setShowSlaSettings] = useState(false);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
+  const [bulkProgress, setBulkProgress] = useState<{
+    action: string;
+    done: number;
+    total: number;
+    fails: string[];
+  } | null>(null);
+  const [showBulkReassign, setShowBulkReassign] = useState(false);
+  const [bulkReassignDriverId, setBulkReassignDriverId] = useState("");
+  const [showBulkCancelConfirm, setShowBulkCancelConfirm] = useState(false);
+
+  const toggleJobSelection = useCallback((jobId: string) => {
+    setSelectedJobIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+  }, []);
+
+  const clearJobSelection = useCallback(() => setSelectedJobIds(new Set()), []);
+
+  // Helper function to check if a date is today
+  const isToday = (date: string | Date): boolean => {
+    const today = new Date();
+    const checkDate = new Date(date);
+    return (
+      checkDate.getDate() === today.getDate() &&
+      checkDate.getMonth() === today.getMonth() &&
+      checkDate.getFullYear() === today.getFullYear()
+    );
+  };
+
+  // 🎯 Group job statuses so jobs never fall between tabs. A job in ON_THE_WAY / ARRIVED /
+  // STARTED / REACHED / IN_PROGRESS is actively being worked by a driver — it belongs in
+  // the ACTIVE tab alongside ACTIVE jobs. FINISHED/COMPLETED and NOSHOW/NO_SHOW are kept
+  // interchangeable so historic jobs in either spelling still show up. Nothing is removed
+  // from business logic — we're only widening the filter sets.
+  const ACTIVE_TAB_STATUSES = ['ACTIVE', 'ON_THE_WAY', 'ARRIVED', 'STARTED', 'REACHED', 'IN_PROGRESS', 'ACCEPTED'];
+  const FINISHED_TAB_STATUSES = ['FINISHED', 'COMPLETED'];
+  const NOSHOW_TAB_STATUSES = ['NOSHOW', 'NO_SHOW'];
+
   const filteredJobs = useMemo(() => {
     let result = jobs;
+
+    // Status-specific filtering with date restrictions
     if (selectedStatus === "UNASSIGNED") {
       result = result.filter((job) => job.status === "UNASSIGNED" || job.status === "PENDING" || job.status === "REJECTED" || job.status === "RECALLED");
+    } else if (selectedStatus === "FINISHED" || selectedStatus === "CANCELLED" || selectedStatus === "NOSHOW") {
+      // For completed, cancelled, and no-show: filter by status first (accept both spellings)
+      if (selectedStatus === "FINISHED") {
+        result = result.filter((job) => FINISHED_TAB_STATUSES.includes(job.status));
+      } else if (selectedStatus === "NOSHOW") {
+        result = result.filter((job) => NOSHOW_TAB_STATUSES.includes(job.status));
+      } else {
+        result = result.filter((job) => job.status === selectedStatus);
+      }
+
+      // Apply date filtering for these statuses
+      if (dateFilter === "today") {
+        result = result.filter((job) => isToday(job.requestedAt));
+      } else if (dateFilter === "week") {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        result = result.filter((job) => new Date(job.requestedAt) >= weekAgo);
+      } else if (dateFilter === "all") {
+        // Default behavior: show only today's jobs for these statuses
+        result = result.filter((job) => isToday(job.requestedAt));
+      }
+    } else if (selectedStatus === "ACTIVE") {
+      // ACTIVE tab shows all in-transit states so a job never disappears between ASSIGNED and FINISHED
+      result = result.filter((job) => ACTIVE_TAB_STATUSES.includes(job.status));
     } else {
+      // For other statuses (OFFERED, ASSIGNED): show all regardless of date
       result = result.filter((job) => job.status === selectedStatus);
     }
+
+    // Apply service type filter
+    if (selectedServiceType) {
+      result = result.filter((job: any) => {
+        // Treat jobs without serviceType as TAXI (default)
+        const jobServiceType = job.serviceType || "TAXI";
+        return jobServiceType === selectedServiceType;
+      });
+    }
+    
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
       result = result.filter((job) =>
@@ -266,15 +495,24 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
         job.riderName?.toLowerCase().includes(query)
       );
     }
-    if (dateFilter === "today") {
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      result = result.filter((job) => new Date(job.requestedAt) >= today);
-    } else if (dateFilter === "week") {
-      const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-      result = result.filter((job) => new Date(job.requestedAt) >= weekAgo);
+
+    // Apply general date filter only for statuses that aren't FINISHED, CANCELLED, or NOSHOW
+    if (selectedStatus !== "FINISHED" && selectedStatus !== "CANCELLED" && selectedStatus !== "NOSHOW") {
+      if (dateFilter === "today") {
+        result = result.filter((job) => isToday(job.requestedAt));
+      } else if (dateFilter === "week") {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        result = result.filter((job) => new Date(job.requestedAt) >= weekAgo);
+      }
     }
+
     if (driverFilter !== "all") {
       result = result.filter((job) => job.driverId === driverFilter);
+    }
+    // SLA escalation filter — only jobs exceeding their status threshold
+    if (slaOnlyFilter) {
+      result = result.filter((job) => jobSlaOverSec(job, slaThresholds) > 0);
     }
     result.sort((a, b) => {
       const urgencyA = getJobUrgency(a);
@@ -295,21 +533,56 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
       return 0;
     });
     return result;
-  }, [jobs, selectedStatus, searchQuery, dateFilter, driverFilter]);
+  }, [jobs, selectedStatus, selectedServiceType, searchQuery, dateFilter, driverFilter, slaOnlyFilter, slaThresholds]);
+
+  // Count of SLA-escalated jobs across the whole board (after service-type filter)
+  const slaEscalatedCount = useMemo(() => {
+    let list = jobs;
+    if (selectedServiceType) {
+      list = list.filter((j: any) => (j.serviceType || "TAXI") === selectedServiceType);
+    }
+    return list.filter((j) => jobSlaOverSec(j, slaThresholds) > 0).length;
+  }, [jobs, selectedServiceType, slaThresholds]);
 
   // UNASSIGNED tab shows UNASSIGNED + PENDING + REJECTED + RECALLED jobs (matches filter logic)
-  const statusCounts = useMemo(() => ({
-    PENDING: 0,
-    UNASSIGNED: (jobCounters.unassigned ?? 0) + (jobCounters.rejected ?? 0) + (jobCounters.recalled ?? 0),
-    OFFERED: jobCounters.offered ?? 0,
-    ASSIGNED: jobCounters.assigned ?? 0,
-    REJECTED: 0, // Included in UNASSIGNED count
-    NOSHOW: jobCounters.noShow ?? 0,
-    RECALLED: 0, // Included in UNASSIGNED count
-    ACTIVE: jobCounters.active ?? 0,
-    FINISHED: jobCounters.finished ?? 0,
-    CANCELLED: jobCounters.cancelled ?? 0,
-  }), [jobCounters]);
+  // Calculate proper counters with date filtering for specific statuses
+  const statusCounts = useMemo(() => {
+    // Filter jobs by service type first if selected
+    let filteredForCount = jobs;
+    if (selectedServiceType) {
+      filteredForCount = jobs.filter((job: any) => {
+        const jobServiceType = job.serviceType || "TAXI";
+        return jobServiceType === selectedServiceType;
+      });
+    }
+    
+    // Filter today's jobs for FINISHED, CANCELLED, and NOSHOW
+    const todayJobs = filteredForCount.filter(job => isToday(job.requestedAt));
+    
+    // Calculate counts from filtered jobs
+    const unassignedCount = filteredForCount.filter(job => 
+      job.status === 'UNASSIGNED' || job.status === 'PENDING' || 
+      job.status === 'REJECTED' || job.status === 'RECALLED'
+    ).length;
+    
+    const offeredCount = filteredForCount.filter(job => job.status === 'OFFERED').length;
+    const assignedCount = filteredForCount.filter(job => job.status === 'ASSIGNED').length;
+    // ACTIVE count covers every in-transit state so the badge matches what the tab shows
+    const activeCount = filteredForCount.filter(job => ACTIVE_TAB_STATUSES.includes(job.status)).length;
+
+    return {
+      PENDING: 0,
+      UNASSIGNED: unassignedCount,
+      OFFERED: offeredCount,
+      ASSIGNED: assignedCount,
+      REJECTED: 0, // Included in UNASSIGNED count
+      NOSHOW: todayJobs.filter(job => NOSHOW_TAB_STATUSES.includes(job.status)).length,
+      RECALLED: 0, // Included in UNASSIGNED count
+      ACTIVE: activeCount,
+      FINISHED: todayJobs.filter(job => FINISHED_TAB_STATUSES.includes(job.status)).length,
+      CANCELLED: todayJobs.filter(job => job.status === 'CANCELLED').length,
+    };
+  }, [jobCounters, jobs, selectedServiceType]);
 
   const selectedJobDetails = useMemo(() => {
     if (!selectedJobForDetails) return null;
@@ -321,31 +594,88 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
   const handleAssignDriver = async (jobId: string, driverId: string) => {
     const driver = drivers.find((d) => d.id === driverId);
     const job = jobs.find((j) => j.id === jobId);
-    if (!driver || !job) { toast.error("Driver or job not found"); return; }
-    setPendingAssignment({ jobId, driverId, driverName: driver.name, jobReference: job.reference });
+    // Verbose console trace + visible toast so the dispatcher can SEE
+    // where the chain breaks when "click Test Driver1 in dropdown does
+    // nothing" happens. Each branch logs a distinct message.
+    console.log('[assign-trace] click', { jobId, driverId, driverFound: !!driver, jobFound: !!job, driverName: driver?.name });
+    if (!driver) {
+      console.warn('[assign-trace] driver missing from store', { driverId, knownIds: drivers.map(d => d.id) });
+      toast.error(`Driver ${String(driverId).slice(-6)} not found in current driver list — try refreshing`);
+      return;
+    }
+    if (!job) {
+      console.warn('[assign-trace] job missing from store', { jobId, knownIds: jobs.map(j => j.id).slice(0, 5) });
+      toast.error(`Job not found in store — try refreshing the page`);
+      return;
+    }
+    if (!driver.name) {
+      console.warn('[assign-trace] driver has no name field, falling back to id slice', driver);
+    }
+    const driverName = driver.name || `Driver ${String(driverId).slice(-6)}`;
+    console.log('[assign-trace] opening confirm modal', { jobId, driverId, driverName, jobReference: job.reference });
+    setPendingAssignment({ jobId, driverId, driverName, jobReference: job.reference });
     setShowConfirmModal(true);
   };
 
   const confirmAssignment = async () => {
-    if (!pendingAssignment) return;
+    if (!pendingAssignment) {
+      console.warn('[assign-trace] confirmAssignment fired without pendingAssignment');
+      return;
+    }
+    const { jobId, driverId, driverName } = pendingAssignment;
+    console.log('[assign-trace] confirmAssignment -> POST /api/dispatch/jobs/:id/assign', { jobId, driverId });
     try {
-      await assignDriver(pendingAssignment.jobId, pendingAssignment.driverId);
-      toast.success("Driver assigned successfully");
+      await assignDriver(jobId, driverId);
+      console.log('[assign-trace] assign API returned success', { jobId, driverId });
+      toast.success(`Job offered to ${driverName}`);
       setPendingAssignment(null);
-    } catch (error) {
-      console.error("Failed to assign driver:", error);
-      toast.error("Failed to assign driver");
+      // Refresh once so the JobBoard reflects the OFFERED state without
+      // waiting for the next socket roundtrip — useful when sockets are
+      // briefly disconnected.
+      try { await fetchJobs(); } catch { /* non-fatal */ }
+    } catch (error: any) {
+      // Surface the real backend reason so dispatchers don't see a
+      // generic "nothing happened" — the readiness check was previously
+      // failing silently with 409s the user couldn't read.
+      const reason =
+        error?.response?.data?.error ||
+        error?.response?.data?.message ||
+        error?.message ||
+        "Failed to assign driver";
+      console.error("[JobBoard] Manual assign failed:", error?.response?.data || error);
+      toast.error(reason);
     }
   };
 
-  const handleCancelJob = async (jobId: string) => {
+  const handleCancelJob = async (
+    jobId: string,
+    reason?: string,
+    refundAction?: 'STRIPE_REFUND' | 'WALLET_CREDIT' | 'MANUAL_REFUND',
+    manualRefundAcknowledged?: boolean
+  ) => {
     try {
-      await cancelJob(jobId, "Cancelled by dispatcher");
-      toast.success("Job cancelled successfully");
+      await cancelJob(jobId, {
+        reason: reason || "Cancelled by dispatcher",
+        refundAction,
+        manualRefundAcknowledged,
+      });
+      const refundMsg = refundAction === 'STRIPE_REFUND' 
+        ? ' — Stripe refund initiated'
+        : refundAction === 'WALLET_CREDIT'
+        ? ' — credited to customer wallet'
+        : refundAction === 'MANUAL_REFUND'
+        ? ' — manual refund acknowledged'
+        : '';
+      toast.success(`Job cancelled successfully${refundMsg}`);
       await Promise.all([fetchJobs(), fetchJobCounters()]);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to cancel job:", error);
-      toast.error("Failed to cancel job");
+      if (error?.code === 'PAID_JOB_REQUIRES_REFUND') {
+        toast.error("This job is paid — please select a refund option");
+      } else {
+        toast.error("Failed to cancel job");
+      }
+      throw error; // Re-throw so modal knows it failed
     }
   };
 
@@ -364,86 +694,262 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
     }
   };
 
+  // ── Wave 2D — bulk ops helpers ──────────────────────────────────────────────
+  const selectAllVisible = () => {
+    const next = new Set<string>();
+    filteredJobs.forEach((j) => next.add(j.id));
+    setSelectedJobIds(next);
+  };
+
+  const runBulkAction = async (
+    action: string,
+    jobIds: string[],
+    operation: (id: string) => Promise<void>
+  ) => {
+    if (jobIds.length === 0) return;
+    setBulkProgress({ action, done: 0, total: jobIds.length, fails: [] });
+    const fails: string[] = [];
+    // Run sequentially so we don't overload the single-job endpoints.
+    for (let i = 0; i < jobIds.length; i++) {
+      const id = jobIds[i];
+      try {
+        await operation(id);
+      } catch (err: any) {
+        const ref = jobs.find((j) => j.id === id)?.reference || id.slice(0, 6);
+        console.error(`[bulk:${action}] failed for ${ref}`, err);
+        fails.push(ref);
+      }
+      setBulkProgress((prev) =>
+        prev ? { ...prev, done: i + 1, fails: [...fails] } : prev
+      );
+    }
+    const succeeded = jobIds.length - fails.length;
+    if (fails.length === 0) {
+      toast.success(`${action}: all ${succeeded} jobs processed`);
+    } else {
+      toast.error(
+        `${action}: ${succeeded}/${jobIds.length} succeeded. Failed: ${fails.slice(0, 3).join(", ")}${
+          fails.length > 3 ? "…" : ""
+        }`,
+        { duration: 8000 }
+      );
+    }
+    clearJobSelection();
+    await Promise.all([fetchJobs(), fetchJobCounters()]);
+    // Keep the progress visible for a beat so users can read it
+    setTimeout(() => setBulkProgress(null), 2500);
+  };
+
+  const handleBulkCancel = async () => {
+    setShowBulkCancelConfirm(false);
+    await runBulkAction("Cancel", Array.from(selectedJobIds), async (id) => {
+      await cancelJob(id, "Bulk cancellation by dispatcher");
+    });
+  };
+
+  const handleBulkReassign = async () => {
+    if (!bulkReassignDriverId) {
+      toast.error("Pick a driver first");
+      return;
+    }
+    const driverId = bulkReassignDriverId;
+    setShowBulkReassign(false);
+    setBulkReassignDriverId("");
+    await runBulkAction("Reassign", Array.from(selectedJobIds), async (id) => {
+      await assignDriver(id, driverId);
+    });
+  };
+
+  const handleBulkExportCsv = () => {
+    const target = jobs.filter((j) => selectedJobIds.has(j.id));
+    if (target.length === 0) {
+      toast.error("No jobs selected");
+      return;
+    }
+    const headers = [
+      "reference",
+      "status",
+      "requestedAt",
+      "scheduledAt",
+      "pickup",
+      "dropoff",
+      "rider",
+      "phone",
+      "driver",
+      "fare",
+      "paymentStatus",
+    ];
+    const esc = (v: any) => {
+      if (v == null) return "";
+      const s = String(v);
+      if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+    const lines = [headers.join(",")];
+    for (const j of target) {
+      lines.push(
+        [
+          j.reference,
+          j.status,
+          j.requestedAt,
+          j.scheduledAt,
+          getAddressString(j.pickupAddress),
+          getAddressString(j.dropoffAddress),
+          j.riderName || j.customer?.firstName,
+          j.riderPhone || j.customer?.phone,
+          j.assignedDriver
+            ? `${j.assignedDriver.firstName || ""} ${j.assignedDriver.lastName || ""}`.trim()
+            : j.driverId,
+          resolveFareAmount(j).toFixed(2),
+          j.paymentStatus,
+        ]
+          .map(esc)
+          .join(",")
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `jobs-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast.success(`Exported ${target.length} job(s) to CSV`);
+  };
+
   return (
-    <div className={classNames("flex h-full flex-col overflow-hidden rounded-lg", isDark ? "bg-slate-900" : "bg-white")}>
+    <div className={classNames("flex h-full flex-col overflow-hidden", isDark ? "bg-slate-900" : "bg-white")}>
       
       {/* ═══════════════════════════════════════════════════════════════════════════
-          HEADER: Professional Top Bar with Actions
+          HEADER: Compact Toolbar
           ═══════════════════════════════════════════════════════════════════════════ */}
       <div className={classNames(
-        "flex items-center justify-between px-3 py-2 border-b",
-        isDark ? "bg-slate-800/80 border-slate-700/50" : "bg-gradient-to-r from-slate-50 to-white border-slate-200"
+        "flex items-center justify-between px-2 py-1 border-b gap-2",
+        isDark ? "bg-slate-800/80 border-slate-700/50" : "bg-white border-slate-200"
       )}>
-        {/* Left: Title + Create Button */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <Grip size={14} className={isDark ? "text-slate-500" : "text-slate-400"} />
-            <h2 className={classNames("text-sm font-semibold tracking-tight", isDark ? "text-white" : "text-slate-800")}>
-              Jobs
-            </h2>
-          </div>
+        {/* Left: Create Button + Stats */}
+        <div className="flex items-center gap-2">
           <button
             onClick={onCreateJobClick}
             className={classNames(
-              "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all duration-200",
-              "bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-sm shadow-blue-500/25",
-              "hover:from-blue-500 hover:to-blue-400 hover:shadow-md hover:shadow-blue-500/30",
+              "flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold transition-all duration-150",
+              "bg-blue-600 text-white",
+              "hover:bg-blue-500",
               "active:scale-[0.98]"
             )}
           >
-            <Plus size={14} strokeWidth={2.5} />
+            <Plus size={12} strokeWidth={2.5} />
             <span>Create Job</span>
           </button>
+          {/* Quick Stats */}
+          <div className="hidden md:flex items-center gap-1">
+            <span className={classNames(
+              "text-[10px] font-medium tabular-nums",
+              isDark ? "text-slate-400" : "text-slate-500"
+            )}>
+              {filteredJobs.length} total
+            </span>
+            {statusCounts.UNASSIGNED > 0 && (
+              <span className={classNames(
+                "text-[10px] font-semibold tabular-nums",
+                isDark ? "text-rose-400" : "text-rose-500"
+              )}>
+                · {statusCounts.UNASSIGNED} pending
+              </span>
+            )}
+          </div>
         </div>
 
-        {/* Right: Stats + Search + Filters */}
-        <div className="flex items-center gap-2">
-          {/* Quick Stats Pills */}
-          <div className="hidden md:flex items-center gap-1.5">
-            <span className={classNames(
-              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
-              isDark ? "bg-slate-700 text-slate-300" : "bg-slate-100 text-slate-600"
-            )}>
-              Total: {filteredJobs.length}
-            </span>
-            <span className={classNames(
-              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
-              isDark ? "bg-rose-900/40 text-rose-300" : "bg-rose-50 text-rose-600"
-            )}>
-              Pending: {statusCounts.UNASSIGNED}
-            </span>
+        {/* Right: Service Type + Search + Filters */}
+        <div className="flex items-center gap-1.5">
+          {/* Service type switcher */}
+          <div className="hidden md:block">
+            <ServiceTypeSelector
+              value={selectedServiceType || null}
+              onChange={(value) => {
+                setSelectedServiceType((value as any) ?? null);
+              }}
+              allowedTypes={["TAXI", "DELIVERY", "COURIER"]}
+              showAll
+              variant="tabs"
+            />
           </div>
 
           {/* Search Input */}
           <div className="relative">
-            <Search size={12} className={classNames(
-              "absolute left-2.5 top-1/2 -translate-y-1/2",
+            <Search size={11} className={classNames(
+              "absolute left-2 top-1/2 -translate-y-1/2",
               isDark ? "text-slate-500" : "text-slate-400"
             )} />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search..."
+              placeholder="Job #, address..."
               className={classNames(
-                "w-32 md:w-40 rounded-lg border py-1.5 pl-7 pr-7 text-xs outline-none transition-all duration-200",
+                "w-28 md:w-36 rounded-md border py-1 pl-6 pr-6 text-[11px] outline-none transition-all duration-200",
                 isDark
                   ? "border-slate-700 bg-slate-800 text-white placeholder-slate-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
-                  : "border-slate-200 bg-white text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                  : "border-slate-200 bg-slate-50 text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
               )}
             />
             {searchQuery && (
-              <button onClick={() => setSearchQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                <X size={12} />
+              <button onClick={() => setSearchQuery("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                <X size={11} />
               </button>
             )}
           </div>
+
+          {/* SLA-only toggle */}
+          <button
+            onClick={() => setSlaOnlyFilter((v) => !v)}
+            className={classNames(
+              "flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-all duration-200",
+              slaOnlyFilter
+                ? "border-red-500 bg-red-500/10 text-red-500"
+                : isDark
+                  ? "border-slate-700 text-slate-400 hover:border-slate-600 hover:text-slate-300"
+                  : "border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-700"
+            )}
+            title="Show only SLA-escalated jobs"
+          >
+            <Timer size={11} />
+            <span className="hidden md:inline">Escalated</span>
+            {slaEscalatedCount > 0 && (
+              <span
+                className={classNames(
+                  "ml-0.5 rounded-full px-1 text-[9px] font-bold",
+                  slaOnlyFilter ? "bg-red-500 text-white" : "bg-red-500/80 text-white"
+                )}
+              >
+                {slaEscalatedCount}
+              </span>
+            )}
+          </button>
+
+          {/* SLA settings */}
+          <button
+            onClick={() => setShowSlaSettings(true)}
+            className={classNames(
+              "rounded-md border px-1.5 py-1 text-[11px] transition-all",
+              isDark
+                ? "border-slate-700 text-slate-400 hover:border-slate-600 hover:text-slate-300"
+                : "border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-700"
+            )}
+            title="Configure SLA thresholds"
+          >
+            <Settings size={11} />
+          </button>
 
           {/* Filters Toggle */}
           <button
             onClick={() => setShowFilters(!showFilters)}
             className={classNames(
-              "flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all duration-200",
+              "flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-all duration-200",
               showFilters
                 ? "border-blue-500 bg-blue-500/10 text-blue-500"
                 : isDark
@@ -451,56 +957,163 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                   : "border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-700"
             )}
           >
-            <Filter size={12} />
-            <span className="hidden md:inline">Filters</span>
-            <ChevronDown size={12} className={classNames("transition-transform", showFilters && "rotate-180")} />
+            <Filter size={11} />
+            <ChevronDown size={10} className={classNames("transition-transform", showFilters && "rotate-180")} />
           </button>
         </div>
       </div>
+
+      {/* Bulk actions bar — shown when selections exist */}
+      {selectedJobIds.size > 0 && (
+        <div
+          className={classNames(
+            "flex items-center justify-between gap-2 border-b px-2 py-1.5",
+            isDark ? "bg-blue-900/20 border-blue-800" : "bg-blue-50 border-blue-200"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <CheckSquare size={14} className={isDark ? "text-blue-300" : "text-blue-700"} />
+            <span className={classNames(
+              "text-xs font-semibold",
+              isDark ? "text-blue-200" : "text-blue-800"
+            )}>
+              {selectedJobIds.size} selected
+            </span>
+            <button
+              onClick={selectAllVisible}
+              className={classNames(
+                "text-[10px] underline",
+                isDark ? "text-blue-300" : "text-blue-700"
+              )}
+            >
+              Select all visible ({filteredJobs.length})
+            </button>
+            <button
+              onClick={clearJobSelection}
+              className={classNames(
+                "text-[10px] underline",
+                isDark ? "text-slate-400" : "text-slate-500"
+              )}
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowBulkCancelConfirm(true)}
+              disabled={!!bulkProgress}
+              className="rounded bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              Cancel selected
+            </button>
+            <button
+              onClick={() => setShowBulkReassign(true)}
+              disabled={!!bulkProgress}
+              className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              Reassign…
+            </button>
+            <button
+              onClick={handleBulkExportCsv}
+              disabled={!!bulkProgress}
+              className={classNames(
+                "inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold disabled:opacity-50",
+                isDark ? "bg-slate-700 text-slate-200 hover:bg-slate-600" : "bg-slate-200 text-slate-800 hover:bg-slate-300"
+              )}
+            >
+              <Download size={11} />
+              Export CSV
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk progress bar */}
+      {bulkProgress && (
+        <div
+          className={classNames(
+            "flex items-center gap-2 border-b px-2 py-1.5 text-xs",
+            isDark ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-200"
+          )}
+        >
+          <span className={isDark ? "text-slate-200" : "text-slate-700"}>
+            {bulkProgress.action}: {bulkProgress.done}/{bulkProgress.total}
+          </span>
+          <div className={classNames(
+            "flex-1 h-1.5 rounded-full overflow-hidden",
+            isDark ? "bg-slate-700" : "bg-slate-200"
+          )}>
+            <div
+              className="h-full bg-blue-500 transition-all"
+              style={{ width: `${(bulkProgress.done / bulkProgress.total) * 100}%` }}
+            />
+          </div>
+          {bulkProgress.fails.length > 0 && (
+            <span className="text-red-500 font-semibold">{bulkProgress.fails.length} failed</span>
+          )}
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════════════════════════════════
           FILTERS PANEL (Collapsible)
           ═══════════════════════════════════════════════════════════════════════════ */}
       {showFilters && (
         <div className={classNames(
-          "flex items-center gap-4 px-3 py-2 border-b",
+          "flex flex-col gap-2 px-3 py-2 border-b",
           isDark ? "bg-slate-800/50 border-slate-700/50" : "bg-slate-50/80 border-slate-100"
         )}>
-          <div className="flex items-center gap-1.5">
-            <Calendar size={12} className={isDark ? "text-slate-500" : "text-slate-400"} />
-            <select
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value as any)}
-              className={classNames(
-                "rounded-md border px-2 py-1 text-xs outline-none",
-                isDark ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-white text-slate-700"
-              )}
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <Calendar size={12} className={isDark ? "text-slate-500" : "text-slate-400"} />
+              <select
+                value={dateFilter}
+                onChange={(e) => setDateFilter(e.target.value as any)}
+                className={classNames(
+                  "rounded-md border px-2 py-1 text-xs outline-none",
+                  isDark ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-white text-slate-700"
+                )}
+              >
+                <option value="all">
+                  {(selectedStatus === "FINISHED" || selectedStatus === "CANCELLED" || selectedStatus === "NOSHOW") 
+                    ? "Today Only (Default)" 
+                    : "All Time"}
+                </option>
+                <option value="today">Today</option>
+                <option value="week">This Week</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <UserCircle size={12} className={isDark ? "text-slate-500" : "text-slate-400"} />
+              <select
+                value={driverFilter}
+                onChange={(e) => setDriverFilter(e.target.value)}
+                className={classNames(
+                  "rounded-md border px-2 py-1 text-xs outline-none",
+                  isDark ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-white text-slate-700"
+                )}
+              >
+                <option value="all">All Drivers</option>
+                {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.vehicle && d.vehicle !== 'N/A' ? ` - ${d.vehicle}` : ''}</option>)}
+              </select>
+            </div>
+            <button
+              onClick={() => { setDateFilter("all"); setDriverFilter("all"); setSearchQuery(""); }}
+              className={classNames("text-xs underline ml-auto", isDark ? "text-slate-500 hover:text-slate-300" : "text-slate-500 hover:text-slate-700")}
             >
-              <option value="all">All Time</option>
-              <option value="today">Today</option>
-              <option value="week">This Week</option>
-            </select>
+              Clear All
+            </button>
           </div>
-          <div className="flex items-center gap-1.5">
-            <UserCircle size={12} className={isDark ? "text-slate-500" : "text-slate-400"} />
-            <select
-              value={driverFilter}
-              onChange={(e) => setDriverFilter(e.target.value)}
-              className={classNames(
-                "rounded-md border px-2 py-1 text-xs outline-none",
-                isDark ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-white text-slate-700"
-              )}
-            >
-              <option value="all">All Drivers</option>
-              {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-            </select>
-          </div>
-          <button
-            onClick={() => { setDateFilter("all"); setDriverFilter("all"); setSearchQuery(""); }}
-            className={classNames("text-xs underline ml-auto", isDark ? "text-slate-500 hover:text-slate-300" : "text-slate-500 hover:text-slate-700")}
-          >
-            Clear All
-          </button>
+          
+          {/* Info message for date-restricted statuses */}
+          {(selectedStatus === "FINISHED" || selectedStatus === "CANCELLED" || selectedStatus === "NOSHOW") && dateFilter === "all" && (
+            <div className={classNames(
+              "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs",
+              isDark ? "bg-blue-900/20 text-blue-300" : "bg-blue-50 text-blue-700"
+            )}>
+              <AlertCircle size={12} />
+              <span>Showing today's {selectedStatus.toLowerCase()} jobs only. Use date filter to view historical data.</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -508,8 +1121,8 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
           STATUS TABS: Clean Horizontal Navigation
           ═══════════════════════════════════════════════════════════════════════════ */}
       <div className={classNames(
-        "flex items-center gap-1 px-2 py-1.5 overflow-x-auto scrollbar-hide",
-        isDark ? "bg-slate-800/40" : "bg-slate-100/60"
+        "flex items-center gap-0.5 px-1.5 py-1 overflow-x-auto scrollbar-hide border-b",
+        isDark ? "bg-slate-800/40 border-slate-700/30" : "bg-slate-50/80 border-slate-100"
       )}>
         {statusTabs.map((tab) => {
           const isActive = selectedStatus === tab.value;
@@ -519,11 +1132,11 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
               key={tab.value}
               onClick={() => setSelectedStatus(tab.value)}
               className={classNames(
-                "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all duration-200 whitespace-nowrap",
+                "flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition-all duration-150 whitespace-nowrap",
                 isActive
                   ? isDark
                     ? "bg-slate-700 text-white shadow-sm"
-                    : "bg-white text-slate-800 shadow-sm"
+                    : "bg-white text-slate-800 shadow-sm border border-slate-200"
                   : isDark
                     ? "text-slate-400 hover:bg-slate-700/50 hover:text-slate-200"
                     : "text-slate-500 hover:bg-white/60 hover:text-slate-700"
@@ -531,12 +1144,12 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
             >
               <span>{tab.label}</span>
               <span className={classNames(
-                "inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full text-[10px] font-semibold tabular-nums",
+                "inline-flex items-center justify-center min-w-[16px] h-[16px] rounded-full text-[9px] font-semibold tabular-nums",
                 isActive
-                  ? "bg-blue-500 text-white"
-                  : isDark
-                    ? "bg-slate-600 text-slate-400"
-                    : "bg-slate-200 text-slate-500"
+                  ? count > 0 ? "bg-blue-500 text-white" : "bg-slate-500 text-white"
+                  : count > 0
+                    ? isDark ? "bg-slate-600 text-slate-300" : "bg-slate-200 text-slate-600"
+                    : isDark ? "bg-slate-700 text-slate-500" : "bg-slate-100 text-slate-400"
               )}>
                 {count}
               </span>
@@ -548,7 +1161,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
       {/* ═══════════════════════════════════════════════════════════════════════════
           JOB LIST: Modern Card-Based Design
           ═══════════════════════════════════════════════════════════════════════════ */}
-      <div className={classNames("flex-1 overflow-y-auto px-2 py-2 space-y-1.5", isDark ? "bg-slate-900" : "bg-slate-50/50")}>
+      <div className={classNames("flex-1 overflow-y-auto px-1.5 py-1 space-y-1", isDark ? "bg-slate-900" : "bg-slate-50/50")}>
         
         {loading && (
           <div className={classNames("flex items-center justify-center py-12", isDark ? "text-slate-400" : "text-slate-500")}>
@@ -571,40 +1184,97 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
           </div>
         )}
 
-        {filteredJobs.map((job) => {
+        {(() => {
+          const nowJobs = filteredJobs.filter(j => isNowJob(j));
+          const scheduledJobs = filteredJobs.filter(j => !isNowJob(j));
+          const sections: Array<{ type: 'job'; job: any } | { type: 'divider' }> = [];
+          nowJobs.forEach(j => sections.push({ type: 'job', job: j }));
+          if (nowJobs.length > 0 && scheduledJobs.length > 0) sections.push({ type: 'divider' });
+          scheduledJobs.forEach(j => sections.push({ type: 'job', job: j }));
+          // If only scheduled jobs exist, add divider at top
+          if (nowJobs.length === 0 && scheduledJobs.length > 0) sections.unshift({ type: 'divider' });
+          return sections.map((section, sIdx) => {
+            if (section.type === 'divider') {
+              return (
+                <div key={`sched-divider-${sIdx}`} className="flex items-center gap-2 py-1.5 px-1">
+                  <div className={classNames("flex-1 h-px", isDark ? "bg-amber-500/30" : "bg-amber-300")} />
+                  <span className={classNames("flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider", isDark ? "text-amber-400" : "text-amber-600")}>
+                    <Calendar size={10} />
+                    Scheduled Jobs
+                  </span>
+                  <div className={classNames("flex-1 h-px", isDark ? "bg-amber-500/30" : "bg-amber-300")} />
+                </div>
+              );
+            }
+            const job = section.job;
           const urgency = getJobUrgency(job);
           const statusInfo = statusConfig[job.status] || statusConfig.UNASSIGNED;
           const sourceInfo = getSourceInfo(job);
           const isExpanded = expandedJobId === job.id;
           const isSelected = selectedJobId === job.id;
+          const isScheduled = !isNowJob(job);
+          const slaOverSec = jobSlaOverSec(job, slaThresholds);
+          const isBulkSelected = selectedJobIds.has(job.id);
 
           return (
             <article
               key={job.id}
               onClick={() => setExpandedJobId(isExpanded ? null : job.id)}
-              onMouseEnter={() => { if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current); setHoveredJobId(job.id); }}
-              onMouseLeave={() => { hoverTimeoutRef.current = setTimeout(() => setHoveredJobId(null), 4000); }}
+              // Note: hovering the card no longer auto-draws the job's route
+              // on the map — dispatchers found it too noisy when scrolling
+              // through the list. The Eye icon in the action row is the
+              // explicit opt-in; hovering it previews the path, leaving it
+              // clears the preview.
               className={classNames(
-                "group relative rounded-xl border transition-all duration-200 cursor-pointer overflow-hidden",
+                "group relative rounded-lg border transition-all duration-200 cursor-pointer overflow-hidden",
                 isDark
                   ? "bg-slate-800/80 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600"
                   : "bg-white border-slate-200/80 hover:border-slate-300 hover:shadow-sm",
                 isSelected && (isDark ? "ring-2 ring-blue-500/50 border-blue-500/50" : "ring-2 ring-blue-500/30 border-blue-400"),
-                job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.isLate && (isDark ? "border-l-2 border-l-red-500" : "border-l-2 border-l-red-500"),
-                job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.urgencyLevel === 'WARNING' && !urgency.isLate && (isDark ? "border-l-2 border-l-amber-500" : "border-l-2 border-l-amber-500")
+                // Wheelchair job: distinctive purple left border
+                (job.wheelchairs > 0 || job.requirements?.wheelchairs > 0) && (isDark ? "border-l-[3px] border-l-purple-500" : "border-l-[3px] border-l-purple-500"),
+                // Card-paid job: red left border (if not wheelchair)
+                !(job.wheelchairs > 0 || job.requirements?.wheelchairs > 0) && job.paymentStatus === 'PAID' && (isDark ? "border-l-[3px] border-l-red-500" : "border-l-[3px] border-l-red-500"),
+                // Late/warning borders (only if not wheelchair or paid - avoid conflict)
+                !(job.wheelchairs > 0 || job.requirements?.wheelchairs > 0) && job.paymentStatus !== 'PAID' && job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.isLate && (isDark ? "border-l-2 border-l-red-500" : "border-l-2 border-l-red-500"),
+                !(job.wheelchairs > 0 || job.requirements?.wheelchairs > 0) && job.paymentStatus !== 'PAID' && job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.urgencyLevel === 'WARNING' && !urgency.isLate && (isDark ? "border-l-2 border-l-amber-500" : "border-l-2 border-l-amber-500")
               )}
             >
               {/* Main Job Card Content */}
-              <div className="p-2.5">
+              <div className="px-2 py-1.5">
                 
                 {/* Row 1: Reference, Time, Status, Urgency */}
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-1.5 mb-1">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    {/* Bulk select checkbox */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleJobSelection(job.id); }}
+                      className={classNames(
+                        "flex-shrink-0 rounded p-0.5 transition-colors",
+                        isBulkSelected
+                          ? isDark ? "text-blue-400 bg-blue-900/40" : "text-blue-600 bg-blue-100"
+                          : isDark ? "text-slate-500 hover:text-slate-300" : "text-slate-400 hover:text-slate-600"
+                      )}
+                      title={isBulkSelected ? "Deselect" : "Select"}
+                    >
+                      {isBulkSelected ? <CheckSquare size={14} /> : <Square size={14} />}
+                    </button>
+
+                    {/* SLA red clock */}
+                    {slaOverSec > 0 && (
+                      <span
+                        className="flex items-center flex-shrink-0 text-red-500 animate-pulse"
+                        title={`SLA: ${formatOverSec(slaOverSec)}`}
+                      >
+                        <Timer size={13} />
+                      </span>
+                    )}
+
                     {/* Job Reference Badge */}
                     <button
                       onClick={(e) => { e.stopPropagation(); selectJob(job.id); }}
                       className={classNames(
-                        "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-bold tracking-wide transition-all",
+                        "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-bold tracking-wide transition-all flex-shrink-0",
                         "bg-slate-900 text-amber-400 hover:bg-slate-800",
                         isDark && "bg-slate-950"
                       )}
@@ -615,7 +1285,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
 
                     {/* Time */}
                     <span className={classNames(
-                      "flex items-center gap-1 text-[11px] font-medium",
+                      "flex items-center gap-1 text-[11px] font-medium flex-shrink-0",
                       isDark ? "text-slate-400" : "text-slate-500"
                     )}>
                       <Clock size={10} />
@@ -625,23 +1295,34 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                     {/* Date if scheduled */}
                     {job.scheduledAt && (
                       <span className={classNames(
-                        "text-[10px]",
+                        "text-[10px] hidden lg:inline",
                         isDark ? "text-slate-500" : "text-slate-400"
                       )}>
                         {formatDate(job.scheduledAt)}
                       </span>
                     )}
+
+                    {/* LATER badge for scheduled jobs */}
+                    {isScheduled && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide flex-shrink-0",
+                        isDark ? "bg-amber-600 text-white" : "bg-amber-500 text-white"
+                      )}>
+                        <Calendar size={8} />
+                        Later
+                      </span>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-1.5">
-                    {/* Urgency Badge - Only show for non-UNASSIGNED jobs */}
-                    {job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.isLate && (
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {/* Urgency Badge - Only show for jobs waiting for dispatch (UNASSIGNED, PENDING, REJECTED, RECALLED) */}
+                    {(job.status === 'UNASSIGNED' || job.status === 'PENDING' || job.status === 'REJECTED' || job.status === 'RECALLED') && urgency.isLate && (
                       <span className="flex items-center gap-1 rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold text-white animate-pulse">
                         <AlertCircle size={10} />
                         {urgency.lateMinutes}m late
                       </span>
                     )}
-                    {job.status !== 'UNASSIGNED' && job.status !== 'PENDING' && urgency.urgencyLevel === 'WARNING' && !urgency.isLate && (
+                    {(job.status === 'UNASSIGNED' || job.status === 'PENDING' || job.status === 'REJECTED' || job.status === 'RECALLED') && urgency.urgencyLevel === 'WARNING' && !urgency.isLate && (
                       <span className="flex items-center gap-1 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                         <Clock size={10} />
                         {urgency.minutesUntilScheduled}m
@@ -656,14 +1337,207 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                     )}>
                       {statusInfo.label}
                     </span>
+
+                    {/* Dispatch-Mode Badge — shows the dispatcher's broadcast intent
+                        chosen at create time: AUTO (system picks driver), ASSIGNED
+                        (specific driver), or NONE (held in queue, no driver notified). */}
+                    {(() => {
+                      const rawMode = String(job.requirements?.broadcastMode || '').toLowerCase();
+                      const hasAssignedDriver = !!(job.assignedDriverId || job.driverId || job.assignedDriver);
+                      let mode: 'AUTO' | 'ASSIGNED' | 'NONE';
+                      if (rawMode === 'none' || rawMode === 'unassigned') mode = 'NONE';
+                      else if (rawMode === 'manual' || hasAssignedDriver) mode = 'ASSIGNED';
+                      else mode = 'AUTO';
+                      const modeStyle =
+                        mode === 'AUTO'
+                          ? (isDark ? 'bg-blue-900/50 text-blue-200 border border-blue-700' : 'bg-blue-50 text-blue-700 border border-blue-300')
+                          : mode === 'ASSIGNED'
+                          ? (isDark ? 'bg-emerald-900/50 text-emerald-200 border border-emerald-700' : 'bg-emerald-50 text-emerald-700 border border-emerald-300')
+                          : (isDark ? 'bg-orange-900/50 text-orange-200 border border-orange-700' : 'bg-orange-50 text-orange-700 border border-orange-300');
+                      return (
+                        <span
+                          className={classNames(
+                            'rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide',
+                            modeStyle
+                          )}
+                          title={
+                            mode === 'AUTO'
+                              ? 'Auto: system picks the driver'
+                              : mode === 'ASSIGNED'
+                              ? 'Assigned: dispatcher picked a specific driver'
+                              : 'None: held in queue, no driver notified'
+                          }
+                        >
+                          {mode}
+                        </span>
+                      );
+                    })()}
+
+                    {/* Driver-name pill — visible right next to the status so the
+                        dispatcher can tell at a glance who is on the job (or who
+                        rejected it). For ASSIGNED/OFFERED jobs we show the active
+                        driver from job.assignedDriver. For REJECTED jobs we fall
+                        back to the most recent assignment row to surface "rejected
+                        by X" — server clears assignedDriverId on reject, but the
+                        assignments[] history is preserved. */}
+                    {(() => {
+                      const active = job.assignedDriver as any;
+                      let label: string | null = null;
+                      let isRejection = false;
+                      if (active && (active.firstName || active.lastName)) {
+                        label = `${active.firstName || ''} ${active.lastName || ''}`.trim();
+                      } else if (job.status === 'REJECTED') {
+                        const assignments: any[] = (job as any).assignments || [];
+                        const lastRejected = assignments.find(
+                          (a) => String(a?.status || '').toUpperCase() === 'REJECTED'
+                        );
+                        const rejectedDriver = lastRejected?.driver || lastRejected?.users;
+                        if (rejectedDriver?.firstName || rejectedDriver?.lastName) {
+                          label = `${rejectedDriver.firstName || ''} ${rejectedDriver.lastName || ''}`.trim();
+                          isRejection = true;
+                        }
+                      }
+                      if (!label) return null;
+                      return (
+                        <span
+                          className={classNames(
+                            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold max-w-[140px] truncate',
+                            isRejection
+                              ? (isDark ? 'bg-rose-900/50 text-rose-200 border border-rose-700' : 'bg-rose-50 text-rose-700 border border-rose-300')
+                              : (isDark ? 'bg-indigo-900/50 text-indigo-200 border border-indigo-700' : 'bg-indigo-50 text-indigo-700 border border-indigo-300')
+                          )}
+                          title={isRejection ? `Rejected by ${label}` : `Driver: ${label}`}
+                        >
+                          {isRejection ? '✕' : '🚕'} {label}
+                        </span>
+                      );
+                    })()}
+
+                    {/* 🎯 Service Type Badge (TAXI / DELIVERY / COURIER) — only show non-TAXI so card stays clean */}
+                    {job.serviceType && job.serviceType !== 'TAXI' && (
+                      <span className={classNames(
+                        "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide border",
+                        job.serviceType === 'DELIVERY' && (isDark ? "bg-amber-900 text-amber-100 border-amber-700" : "bg-amber-100 text-amber-800 border-amber-300"),
+                        job.serviceType === 'COURIER'  && (isDark ? "bg-cyan-900 text-cyan-100 border-cyan-700" : "bg-cyan-100 text-cyan-800 border-cyan-300")
+                      )}>
+                        {job.serviceType}
+                      </span>
+                    )}
+
+                    {/* Parcel summary chips — quick visual cue on the card so
+                        the dispatcher can see weight / fragile flags without
+                        opening details. Reads from either ride.* or job-level
+                        details to cope with both v1/v2 payload shapes. */}
+                    {job.serviceType && job.serviceType !== 'TAXI' && (() => {
+                      const meta = (job as any).ride?.courierDetails
+                        || (job as any).ride?.foodDeliveryDetails
+                        || (job as any).courierDetails
+                        || (job as any).deliveryDetails
+                        || null;
+                      if (!meta) return null;
+                      const weight = meta.totalWeightKg ?? meta.weightKg ?? null;
+                      return (
+                        <>
+                          {weight != null && Number(weight) > 0 && (
+                            <span className={classNames(
+                              "rounded-full px-2 py-0.5 text-[10px] font-semibold border",
+                              isDark ? "bg-slate-800 text-slate-200 border-slate-600" : "bg-slate-100 text-slate-700 border-slate-300"
+                            )}>
+                              {Number(weight).toFixed(1)} kg
+                            </span>
+                          )}
+                          {meta.fragile && (
+                            <span className={classNames(
+                              "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide border",
+                              isDark ? "bg-rose-900/60 text-rose-200 border-rose-700" : "bg-rose-100 text-rose-700 border-rose-300"
+                            )}>FRAGILE</span>
+                          )}
+                        </>
+                      );
+                    })()}
+
+                    {/* PAID Badge with amount - always visible next to status */}
+                    {job.paymentStatus === 'PAID' && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+                        isDark ? "bg-red-600 text-white" : "bg-red-500 text-white"
+                      )}>
+                        <CreditCard size={10} />
+                        {job.chargedAmount ? `$${Number(job.chargedAmount).toFixed(2)}` : 'Paid'}
+                      </span>
+                    )}
+
+                    {/* Finished-job summary chips: total + payment method.
+                        Dispatcher needs to see "what did this trip earn and
+                        how was it paid" at a glance from the FINISHED tab
+                        without opening the details modal each time. We only
+                        render for finalised jobs to avoid clutter on
+                        active/offered rows. The PAID badge above already
+                        covers up-front-card jobs, so this chip is the
+                        catch-all for cash + post-trip card. */}
+                    {(() => {
+                      const isFinalised = ['FINISHED', 'COMPLETED', 'CANCELLED', 'CANCELED', 'NOSHOW', 'NO_SHOW'].includes(String(job.status || '').toUpperCase());
+                      if (!isFinalised) return null;
+                      const fareAmount = resolveFareAmount(job);
+                      const method = String(job.paymentMethod || '').toUpperCase();
+                      const txCurrency = Array.isArray((job as any).transactions) && (job as any).transactions.length > 0
+                        ? ((job as any).transactions[0]?.currency || null)
+                        : null;
+                      const cur = String(
+                        txCurrency || (job as any).currency || (job as any).requirements?.currency || 'NZD'
+                      ).toUpperCase();
+                      const showAmount = fareAmount > 0;
+                      const showMethod = method === 'CASH' || method === 'CARD';
+                      // If this is the up-front-paid card case, the PAID
+                      // badge above already shows everything — skip to
+                      // avoid duplicating info in two adjacent chips.
+                      if (job.paymentStatus === 'PAID' && method === 'CARD') return null;
+                      if (!showAmount && !showMethod) return null;
+                      return (
+                        <span className={classNames(
+                          "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide border",
+                          method === 'CASH'
+                            ? (isDark ? 'bg-emerald-900/40 text-emerald-200 border-emerald-700' : 'bg-emerald-50 text-emerald-700 border-emerald-300')
+                            : (isDark ? 'bg-blue-900/40 text-blue-200 border-blue-700' : 'bg-blue-50 text-blue-700 border-blue-300')
+                        )}>
+                          {method === 'CASH' ? '💵' : <CreditCard size={10} />}
+                          {showAmount ? `${cur} ${fareAmount.toFixed(2)}` : (method || 'Paid')}
+                          {showAmount && showMethod ? ` · ${method}` : ''}
+                        </span>
+                      );
+                    })()}
+
+                    {/* Offered-to badge — surfaces which driver the job is
+                        currently being offered to and the countdown until the
+                        offer auto-expires. Only shown for OFFERED jobs. */}
+                    {job.status === 'OFFERED' && (job as any).offeredDriverId && (() => {
+                      const expiresAt = (job as any).offerExpiresAt ? new Date((job as any).offerExpiresAt).getTime() : null;
+                      const secsLeft = expiresAt ? Math.max(0, Math.round((expiresAt - Date.now()) / 1000)) : null;
+                      const driverId = (job as any).offeredDriverId;
+                      const driver = drivers.find((d: any) => d.id === driverId || d.userId === driverId);
+                      const driverLabel = driver
+                        ? (driver.firstName || driver.name || `Driver ${String(driverId).slice(-4)}`)
+                        : `Driver ${String(driverId).slice(-4)}`;
+                      return (
+                        <span
+                          className={classNames(
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                            isDark ? "bg-purple-900/50 text-purple-300 border border-purple-700" : "bg-purple-50 text-purple-700 border border-purple-300"
+                          )}
+                          title={`Offered to ${driverLabel}${secsLeft != null ? `, ${secsLeft}s until auto-expiry` : ''}`}
+                        >
+                          → {driverLabel}{secsLeft != null ? ` · ${secsLeft}s` : ''}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
 
                 {/* Row 2: Addresses - Inline Layout */}
-                <div className="flex items-center gap-2 mb-2">
+                <div className="flex items-center gap-1.5 mb-1">
                   {/* Pickup */}
-                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-500/20 flex-shrink-0" />
+                  <div className="flex items-center gap-1 flex-1 min-w-0">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-emerald-500/20 flex-shrink-0" />
                     <p className={classNames(
                       "text-xs font-medium leading-tight truncate",
                       isDark ? "text-slate-200" : "text-slate-700"
@@ -676,11 +1550,11 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                   <span className={classNames("text-xs flex-shrink-0", isDark ? "text-slate-500" : "text-slate-400")}>→</span>
 
                   {/* Dropoff */}
-                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                  <div className="flex items-center gap-1 flex-1 min-w-0">
                     <div className={classNames(
-                      "w-2 h-2 rounded-full flex-shrink-0",
+                      "w-1.5 h-1.5 rounded-full flex-shrink-0",
                       getAddressString(job.dropoffAddress) 
-                        ? "bg-red-500 ring-2 ring-red-500/20" 
+                        ? "bg-red-500 ring-1 ring-red-500/20" 
                         : isDark ? "bg-slate-600" : "bg-slate-300"
                     )} />
                     <p className={classNames(
@@ -695,7 +1569,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                 </div>
 
                 {/* Row 3: Meta Info + Actions */}
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-1.5">
                   {/* Left: Meta chips */}
                   <div className="flex items-center gap-1.5 flex-wrap">
                     {/* Vehicle Type */}
@@ -706,6 +1580,16 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                       🚗 {job.vehicleTypeName || job.vehicleType || "Any"}
                     </span>
 
+                    {/* Tariff */}
+                    {job.tariffName && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
+                        isDark ? "bg-indigo-600 text-white border border-indigo-400" : "bg-indigo-100 text-indigo-700 border border-indigo-300"
+                      )}>
+                        {job.tariffName}
+                      </span>
+                    )}
+
                     {/* Passengers */}
                     <span className={classNames(
                       "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
@@ -714,6 +1598,30 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                       <Users size={10} />
                       {job.passengers || job.requirements?.passengers || 1}
                     </span>
+
+                    {/* Bags - only show if > 0 */}
+                    {(job.bags > 0 || job.requirements?.bags > 0) && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+                        isDark ? "bg-slate-700 text-slate-300" : "bg-slate-100 text-slate-600"
+                      )}>
+                        <Briefcase size={10} />
+                        {job.bags || job.requirements?.bags || 0}
+                      </span>
+                    )}
+
+                    {/* Wheelchairs - distinctive styling for quick recognition */}
+                    {(job.wheelchairs > 0 || job.requirements?.wheelchairs > 0) && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-bold",
+                        isDark
+                          ? "bg-purple-600 text-white border border-purple-400"
+                          : "bg-purple-500 text-white border border-purple-600"
+                      )}>
+                        <Accessibility size={10} />
+                        {job.wheelchairs || job.requirements?.wheelchairs || 0}
+                      </span>
+                    )}
 
                     {/* Phone */}
                     {(job.riderPhone || job.customer?.phone) && (
@@ -726,9 +1634,27 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                       </span>
                     )}
 
+                    {/* Card Paid chip in meta row */}
+                    {job.paymentStatus === 'PAID' && (
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-bold",
+                        isDark
+                          ? "bg-red-600 text-white border border-red-400"
+                          : "bg-red-500 text-white border border-red-600"
+                      )}>
+                        <CreditCard size={10} />
+                        PAID
+                      </span>
+                    )}
+
                     {/* Stops */}
                     {((job.stops?.length || 0) + (job.requirements?.stops?.length || 0)) > 0 && (
-                      <span className="inline-flex items-center gap-0.5 rounded-md bg-purple-500/20 px-1.5 py-0.5 text-[10px] font-medium text-purple-400">
+                      <span className={classNames(
+                        "inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+                        isDark
+                          ? "bg-amber-500/25 text-amber-300 border border-amber-500/40"
+                          : "bg-amber-100 text-amber-700"
+                      )}>
                         +{job.stops?.length || job.requirements?.stops?.length || 0} stops
                       </span>
                     )}
@@ -750,7 +1676,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                           defaultValue=""
                         >
                           <option value="">Assign...</option>
-                          {availableDrivers.slice(0, 15).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                          {availableDrivers.slice(0, 15).map((d) => <option key={d.id} value={d.id}>{d.name}{d.vehicle && d.vehicle !== 'N/A' ? ` - ${d.vehicle}` : ''}</option>)}
                         </select>
 
                         <button
@@ -813,7 +1739,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                         >
                           <option value="">Reassign...</option>
                           {drivers.filter(d => d.id !== job.driverId && d.id !== job.assignedDriver?.id).slice(0, 15).map((d) => (
-                            <option key={d.id} value={d.id}>{d.name}</option>
+                            <option key={d.id} value={d.id}>{d.name}{d.vehicle && d.vehicle !== 'N/A' ? ` - ${d.vehicle}` : ''}</option>
                           ))}
                         </select>
 
@@ -835,6 +1761,53 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                         </button>
                       </>
                     )}
+
+                    {onEditJob && canEditJob(job.status) && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onEditJob(job.id, job); }}
+                        className={classNames(
+                          "rounded-md p-1.5 transition-colors",
+                          isDark ? "hover:bg-emerald-900/50 text-emerald-400" : "hover:bg-emerald-50 text-emerald-600"
+                        )}
+                        title="Edit Job"
+                      >
+                        <Pencil size={12} />
+                      </button>
+                    )}
+
+                    {/* Eye icon — hover to preview this job's route on the
+                        map without selecting / expanding / navigating.
+                        Intentionally triggers on onMouseMove rather than
+                        onMouseEnter: when the Create Job panel closes, the
+                        layout shifts and the cursor can end up over this
+                        icon without the user moving the mouse, firing a
+                        phantom onMouseEnter that would paint the route.
+                        onMouseMove requires actual pointer motion. */}
+                    <button
+                      type="button"
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseMove={(e) => {
+                        e.stopPropagation();
+                        if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+                        // Only set if not already the hovered job, so we're
+                        // not churning the store on every pointer tick.
+                        const current = useDispatchStore.getState().hoveredJobId;
+                        if (current !== job.id) setHoveredJobId(job.id);
+                      }}
+                      onMouseLeave={(e) => {
+                        e.stopPropagation();
+                        if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+                        setHoveredJobId(null);
+                      }}
+                      className={classNames(
+                        "rounded-md p-1.5 transition-colors",
+                        isDark ? "hover:bg-blue-900/50 text-blue-300" : "hover:bg-blue-50 text-blue-600"
+                      )}
+                      title="Hover to preview route on map"
+                      aria-label="Preview job route on map"
+                    >
+                      <Eye size={12} />
+                    </button>
 
                     <button
                       onClick={(e) => { e.stopPropagation(); setSelectedJobForDetails(job.id); }}
@@ -859,7 +1832,7 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
               {/* Expanded Details Panel */}
               {isExpanded && (
                 <div className={classNames(
-                  "border-t px-3 py-2.5",
+                  "border-t px-2.5 py-2",
                   isDark ? "bg-slate-900/50 border-slate-700/50" : "bg-slate-50 border-slate-100"
                 )}>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -892,12 +1865,14 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
                     {/* Timer/Status */}
                     <div className={classNames("rounded-lg p-2", isDark ? "bg-slate-800" : "bg-white border border-slate-100")}>
                       <p className={classNames("text-[10px] uppercase tracking-wide mb-0.5", isDark ? "text-slate-500" : "text-slate-400")}>Status</p>
-                      {urgency.isLate ? (
+                      {(job.status === 'UNASSIGNED' || job.status === 'PENDING' || job.status === 'REJECTED' || job.status === 'RECALLED') && urgency.isLate ? (
                         <p className="text-xs font-bold text-red-500">{urgency.lateMinutes}m Late</p>
-                      ) : urgency.minutesUntilScheduled > 0 ? (
+                      ) : (job.status === 'UNASSIGNED' || job.status === 'PENDING' || job.status === 'REJECTED' || job.status === 'RECALLED') && urgency.minutesUntilScheduled > 0 ? (
                         <p className={classNames("text-xs font-medium", isDark ? "text-blue-400" : "text-blue-600")}>{urgency.minutesUntilScheduled}m until pickup</p>
-                      ) : (
+                      ) : (job.status === 'UNASSIGNED' || job.status === 'PENDING' || job.status === 'REJECTED' || job.status === 'RECALLED') ? (
                         <p className="text-xs font-medium text-emerald-500">Ready Now</p>
+                      ) : (
+                        <p className={classNames("text-xs font-medium", isDark ? "text-slate-400" : "text-slate-600")}>{statusInfo.label}</p>
                       )}
                     </div>
 
@@ -948,7 +1923,8 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
               )}
             </article>
           );
-        })}
+          });
+        })()}
       </div>
 
       {/* Modals */}
@@ -968,6 +1944,109 @@ const JobBoard: React.FC<JobBoardProps> = ({ onCreateJobClick, onEditJob }) => {
         driverName={pendingAssignment?.driverName || ""}
         jobReference={pendingAssignment?.jobReference || ""}
       />
+
+      {/* SLA settings */}
+      <SlaSettingsModal
+        open={showSlaSettings}
+        onClose={() => setShowSlaSettings(false)}
+        onSaved={(t) => setSlaThresholds(t)}
+      />
+
+      {/* Bulk cancel confirmation */}
+      {showBulkCancelConfirm && (
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setShowBulkCancelConfirm(false)}
+        >
+          <div
+            className={classNames(
+              "w-full max-w-sm rounded-xl shadow-2xl border p-4",
+              isDark ? "bg-slate-900 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900"
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-bold mb-2">Cancel {selectedJobIds.size} jobs?</h3>
+            <p className={classNames("text-xs mb-4", isDark ? "text-slate-400" : "text-slate-500")}>
+              This will call the single-job cancel endpoint for each selected job. Paid jobs may
+              require manual refund handling afterwards.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowBulkCancelConfirm(false)}
+                className={classNames(
+                  "rounded px-3 py-1.5 text-xs",
+                  isDark ? "text-slate-300 hover:bg-slate-800" : "text-slate-600 hover:bg-slate-100"
+                )}
+              >
+                Keep jobs
+              </button>
+              <button
+                onClick={handleBulkCancel}
+                className="rounded bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+              >
+                Cancel all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk reassign picker */}
+      {showBulkReassign && (
+        <div
+          className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setShowBulkReassign(false)}
+        >
+          <div
+            className={classNames(
+              "w-full max-w-sm rounded-xl shadow-2xl border p-4",
+              isDark ? "bg-slate-900 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-900"
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-bold mb-2">Reassign {selectedJobIds.size} jobs</h3>
+            <p className={classNames("text-xs mb-3", isDark ? "text-slate-400" : "text-slate-500")}>
+              Each job will be unassigned from its current driver (if any) and reassigned.
+            </p>
+            <select
+              value={bulkReassignDriverId}
+              onChange={(e) => setBulkReassignDriverId(e.target.value)}
+              className={classNames(
+                "w-full rounded border px-2 py-1.5 text-sm outline-none mb-3",
+                isDark
+                  ? "border-slate-700 bg-slate-800 text-white"
+                  : "border-slate-300 bg-white text-slate-800"
+              )}
+            >
+              <option value="">Select driver…</option>
+              {availableDrivers.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.vehicle && d.vehicle !== "N/A" ? ` — ${typeof d.vehicle === "string" ? d.vehicle : d.vehicle?.plateNumber || ""}` : ""}
+                </option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setShowBulkReassign(false); setBulkReassignDriverId(""); }}
+                className={classNames(
+                  "rounded px-3 py-1.5 text-xs",
+                  isDark ? "text-slate-300 hover:bg-slate-800" : "text-slate-600 hover:bg-slate-100"
+                )}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkReassign}
+                disabled={!bulkReassignDriverId}
+                className="rounded bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                Reassign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

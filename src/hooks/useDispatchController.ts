@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import toast from "react-hot-toast";
+import { createId } from "@paralleldrive/cuid2";
+
+// Module-level dedupe table for driver-rejection toasts. Lives outside any
+// React closure so it survives effect re-runs, hot-reloads, and the
+// possibility of multiple socket listeners briefly co-existing during
+// HMR. Backend emits the SAME job:rejected payload to up to 3 rooms
+// (dispatch_, company_, super_admin); the dispatcher's socket may be
+// joined to more than one and a retry cascade can replay the event.
+// Keyed on jobId alone (not jobId + rejectedAt + reason) to guarantee
+// collapse even if payload fields drift between fan-out copies. A real
+// second rejection of the same job inside 2s is implausible — the
+// driver/timer can't physically generate it that fast.
+const REJECTION_DEDUPE_MS = 2000;
+const rejectionDedupe = new Map<string, number>();
 import {
     AdminUser,
     RideManagement,
@@ -9,6 +23,9 @@ import {
 } from "../config/endpoints";
 import { useDispatchSocket } from "../providers/SocketProvider";
 import api from "../services/api";
+import { registerDispatchRefetch } from "../services/dispatchSyncBus";
+import { checkV2Availability, isV2PathUnsupported, markV2PathUnsupported } from "../services/v2/apiClient";
+import { getJobs as getV2Jobs } from "../services/v2/jobService";
 import { useAuthStore } from "../store/useAuthStore";
 import {
     DispatchDriver,
@@ -20,13 +37,25 @@ import {
 } from "../store/useDispatchStore";
 import { nowIso } from "../utils/objectUtils";
 
+// Module-scoped bootstrap guard — set when the first `useDispatchController`
+// consumer (usually App) completes initialise() for a given user+token. Any
+// subsequent consumer (JobBoard / JobDetailsModal / JobComposer) short-
+// circuits its own initialise() so we don't multiply every initial-load
+// endpoint (health / drivers / zones / counters / jobs / tariffs / vehicle-
+// types) by the number of consumers mounted.
+const dispatchInitGuard = {
+  key: null as string | null,
+  inFlight: null as Promise<void> | null,
+};
+
 const DRIVER_STATUS_MAP: Record<string, DispatchDriver["status"]> = {
   available: "AVAILABLE",
   online: "AVAILABLE",
   busy: "BUSY",
   onride: "BUSY",
-  on_the_way: "BUSY",
-  roger: "ROGER", // On the way to pickup
+  on_the_way: "ON_THE_WAY",
+  roger: "ROGER",
+  arrived: "ARRIVED",
   away: "AWAY",
   offline: "OFFLINE",
   suspended: "OFFLINE",
@@ -40,10 +69,10 @@ const JOB_STATUS_MAP: Record<string, JobStatus | undefined> = {
   offered: "OFFERED",
   accepted: "ASSIGNED",
   assigned: "ASSIGNED",
-  on_the_way: "ASSIGNED",
-  ontheway: "ASSIGNED",
-  arrived: "ASSIGNED",
-  arrived_ready: "ASSIGNED",
+  on_the_way: "ON_THE_WAY",
+  ontheway: "ON_THE_WAY",
+  arrived: "ARRIVED",
+  arrived_ready: "ARRIVED",
   started: "ACTIVE",
   active: "ACTIVE",
   in_progress: "ACTIVE",
@@ -63,6 +92,8 @@ const VALID_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
   "UNASSIGNED",
   "OFFERED",
   "ASSIGNED",
+  "ON_THE_WAY",
+  "ARRIVED",
   "REJECTED",
   "NOSHOW",
   "RECALLED",
@@ -318,10 +349,10 @@ const mapDriver = (raw: any): DispatchDriver => {
   
   // Try firstName + lastName if name is empty
   if (!name) {
-    const firstLast = [raw.firstName, raw.lastName, info.firstName, info.lastName]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
+    // ✅ FIX: When info === raw (no driverInfo wrapper), avoid duplicating names
+    const first = raw.firstName || info.firstName || '';
+    const last = raw.lastName || info.lastName || '';
+    const firstLast = `${first} ${last}`.trim();
     if (firstLast) {
       name = firstLast;
     }
@@ -404,7 +435,7 @@ const mapDriver = (raw: any): DispatchDriver => {
   const lastUpdateSource = raw.__source ?? "api";
 
   return {
-    id: info.id ?? raw.id ?? raw.driverId ?? `driver-${Math.random()}`,
+    id: info.id ?? raw.id ?? raw.driverId ?? `driver-${createId()}`,
     name: name.length ? name : "Unknown driver",
     vehicle: vehicleNumber,
     vehicleType: vehicleType,
@@ -462,6 +493,57 @@ const mapDriverInfo = (source: any, fallbackId?: string | number | null) => {
   };
 };
 
+// Normalize V2 job payload into legacy shape expected by mapJob
+const mapV2JobToLegacy = (raw: any) => {
+  if (!raw) return raw;
+  return {
+    id: raw.id,
+    jobId: raw.id,
+    reference: raw.id,
+    status: raw.status ?? raw.currentStatus ?? raw.jobStatus,
+    pickupAddress: raw.pickupLocation?.address ?? raw.pickupAddress,
+    pickupLatitude: raw.pickupLocation?.latitude,
+    pickupLongitude: raw.pickupLocation?.longitude,
+    dropoffAddress: raw.dropoffLocation?.address ?? raw.dropoffAddress,
+    dropoffLatitude: raw.dropoffLocation?.latitude,
+    dropoffLongitude: raw.dropoffLocation?.longitude,
+    customerId: raw.customerId,
+    riderName: raw.customer?.name ?? raw.customer?.fullName,
+    riderPhone: raw.customer?.phone,
+    createdAt: raw.createdAt,
+    requestedAt: raw.createdAt,
+    actualFare: raw.actualFare ?? raw.finalAmount,
+    finalAmount: raw.finalAmount,
+    requirements: {
+      passengers: raw.requirements?.passengers,
+      bags: raw.requirements?.bags,
+      wheelchairs: raw.requirements?.wheelchairs,
+      vehiclesNeeded: raw.requirements?.vehiclesNeeded,
+      currency: raw.requirements?.currency ?? raw.currency,
+      fareBreakdown: raw.requirements?.fareBreakdown,
+      passengerName: raw.requirements?.passengerName ?? raw.customer?.name,
+      passengerPhone: raw.requirements?.passengerPhone ?? raw.customer?.phone,
+      passengerEmail: raw.requirements?.passengerEmail ?? raw.customer?.email,
+      stops: raw.stops?.map((s: any, idx: number) => ({
+        address: s.address,
+        latitude: s.latitude,
+        longitude: s.longitude,
+        order: s.sequence ?? idx + 1,
+      })),
+    },
+    stops: raw.stops?.map((s: any, idx: number) => ({
+      address: s.address,
+      latitude: s.latitude,
+      longitude: s.longitude,
+      order: s.sequence ?? idx + 1,
+    })),
+    assignedDriver: raw.driver ?? raw.assignedDriver,
+    driverId: raw.driverId ?? raw.assignedDriverId,
+    serviceType: raw.serviceType,
+    fullRawData: raw,
+  };
+};
+
 const mapJob = (raw: any): DispatchJob => {
   const rawStatusInput = String(raw.status ?? "").trim();
   const lowercaseStatus = rawStatusInput.toLowerCase();
@@ -474,13 +556,7 @@ const mapJob = (raw: any): DispatchJob => {
       : "UNASSIGNED");
 
   // Debug logging for CityCabs company
-  console.log("🔍 [mapJob] Processing job:", {
-    jobId: raw.id,
-    reference: raw.jobId || raw.reference,
-    rawStatus: normalizedStatus,
-    mappedStatus: status,
-    fullRawData: raw,
-  });
+  // Debug logging removed to reduce console noise
 
   const normalizeLocation = (
     value: any,
@@ -499,12 +575,17 @@ const mapJob = (raw: any): DispatchJob => {
     const source =
       value.coordinates ?? value.location ?? value.position ?? value;
 
-    const latitude = Number(
-      source.latitude ?? source.lat ?? source[1] ?? source.y
-    );
-    const longitude = Number(
-      source.longitude ?? source.lng ?? source.lon ?? source[0] ?? source.x
-    );
+    // Extract raw values BEFORE Number() conversion — null/undefined means "no coordinate"
+    const rawLat = source.latitude ?? source.lat ?? source[1] ?? source.y;
+    const rawLng = source.longitude ?? source.lng ?? source.lon ?? source[0] ?? source.x;
+
+    // Reject if raw values are null/undefined (no coordinate provided)
+    if (rawLat == null || rawLng == null) {
+      return undefined;
+    }
+
+    const latitude = Number(rawLat);
+    const longitude = Number(rawLng);
 
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       return undefined;
@@ -560,9 +641,8 @@ const mapJob = (raw: any): DispatchJob => {
     dropoffLocation?.address ??
     raw.dropoffAddress ??
     raw.destination?.address ??
-    raw.dropoffLocation?.name ??
-    raw.dropoffLocation ??
-    "Unknown dropoff";
+    (typeof raw.dropoffLocation === 'string' ? raw.dropoffLocation : null) ??
+    null;
 
   const safeRoutePath = Array.isArray(raw.routePath)
     ? raw.routePath
@@ -707,7 +787,7 @@ const mapJob = (raw: any): DispatchJob => {
   );
 
   return {
-    id: String(raw.id ?? raw.rideId ?? raw.reference ?? Math.random()),
+    id: String(raw.id ?? raw.rideId ?? raw.reference ?? createId()),
     reference:
       raw.jobId ?? 
       raw.reference ??
@@ -763,12 +843,25 @@ const mapJob = (raw: any): DispatchJob => {
       undefined,
     paymentMethod:
       raw.paymentMethod ??
+      raw.fullRawData?.paymentMethod ??
       raw.payment?.method ??
       raw.billing?.paymentMethod ??
+      (parsedRequirements?.stripePaymentIntentId ? 'CARD' : undefined) ??
       undefined,
     driverId: driverIdValue ? String(driverIdValue) : undefined,
-    // Enhanced tariff extraction - check fullRawData first!
-    tariffName: raw.fullRawData?.tariff?.name ?? raw.tariff?.name ?? raw.tariffName ?? undefined,
+    // Enhanced tariff extraction - check fullRawData first, then fallback to store lookup
+    tariffName: (() => {
+      const directName = raw.fullRawData?.tariffName ?? raw.fullRawData?.tariff?.name ?? raw.fullRawData?.tariffs?.name ?? raw.tariff?.name ?? raw.tariffs?.name ?? raw.tariffName ?? parsedRequirements?.tariffName;
+      if (directName) return directName;
+      // Fallback: look up tariff name from store using tariffId
+      const tId = raw.fullRawData?.requirements?.tariffId ?? raw.fullRawData?.tariffId ?? raw.requirements?.tariffId ?? raw.tariffId;
+      if (tId) {
+        const storeTariffs = useDispatchStore.getState().tariffs;
+        const found = storeTariffs.find((t: any) => String(t.id) === String(tId));
+        if (found?.name) return found.name;
+      }
+      return undefined;
+    })(),
     tariffId: 
       raw.fullRawData?.requirements?.tariffId ??
       raw.fullRawData?.tariffId ??
@@ -803,6 +896,16 @@ const mapJob = (raw: any): DispatchJob => {
     createdBy: createdBy ?? null,
     createdByDriver: mapDriverInfo(createdByDriverRaw, driverIdValue) ?? null,
     assignedDriver: normalizedAssignedDriver,
+    // Vehicle type for the job
+    vehicleType: raw.fullRawData?.vehicleType ?? raw.vehicleType ?? parsedRequirements?.vehicleType ?? undefined,
+    vehicleTypeName: (() => {
+      const vt = raw.fullRawData?.vehicleType ?? raw.vehicleType ?? parsedRequirements?.vehicleType;
+      if (!vt) return undefined;
+      // Look up display name from store
+      const storeVehicleTypes = useDispatchStore.getState().vehicleTypes;
+      const found = storeVehicleTypes.find((t: any) => t.code === vt || t.id === vt || t.name === vt);
+      return found?.name ?? vt;
+    })(),
     // Enhanced location coordinates - check fullRawData first!
     pickupLat: raw.fullRawData?.pickupLatitude ?? raw.pickupLatitude ?? raw.fullRawData?.pickupLat ?? raw.pickupLat,
     pickupLng: raw.fullRawData?.pickupLongitude ?? raw.pickupLongitude ?? raw.fullRawData?.pickupLng ?? raw.pickupLng,
@@ -841,7 +944,35 @@ const mapJob = (raw: any): DispatchJob => {
       undefined,
     lastUpdateAt: raw.lastUpdateAt ?? nowIso(),
     lastUpdateSource: raw.__source ?? "api",
-  };
+    // Payment tracking
+    paymentStatus: raw.paymentStatus ?? raw.fullRawData?.paymentStatus ?? parsedRequirements?.paymentStatus ?? (parsedRequirements?.stripePaymentIntentId ? 'PAID' : undefined),
+    paymentIntentId: raw.paymentIntentId ?? raw.fullRawData?.paymentIntentId ?? parsedRequirements?.stripePaymentIntentId ?? undefined,
+    stripePaymentMethodId: raw.stripePaymentMethodId ?? raw.fullRawData?.stripePaymentMethodId ?? parsedRequirements?.stripePaymentMethodId ?? undefined,
+    chargedAmount: raw.chargedAmount ?? raw.fullRawData?.chargedAmount ?? parsedRequirements?.chargedAmount ?? undefined,
+    totalCharged: parsedRequirements?.totalCharged ?? raw.fullRawData?.totalCharged ?? undefined,
+    paidAt: parsedRequirements?.paidAt ?? raw.fullRawData?.paidAt ?? undefined,
+    transactions: (() => {
+      const txs = raw.transactions ?? raw.fullRawData?.transactions ?? raw.fullRawData?.payments ?? [];
+      return Array.isArray(txs) ? txs : [];
+    })(),
+    extraCharges: parsedRequirements?.extraCharges ?? raw.fullRawData?.extraCharges ?? [],
+    // Offer metadata — kept on the DispatchJob so the JobBoard can render the
+    // "Offered → <driver> · <N>s" badge and tick it down in real time. The
+    // backend sometimes emits this as `expiresAt` on job:progress:updated and
+    // sometimes as `offerExpiresAt` on job:data:updated, so we accept both.
+    offerExpiresAt:
+      raw.offerExpiresAt ??
+      raw.expiresAt ??
+      raw.fullRawData?.offerExpiresAt ??
+      raw.fullRawData?.expiresAt ??
+      parsedRequirements?.offerExpiresAt ??
+      undefined,
+    offeredDriverId:
+      raw.offeredDriverId ??
+      raw.fullRawData?.offeredDriverId ??
+      parsedRequirements?.offeredDriverId ??
+      (status === 'OFFERED' ? driverIdValue ?? raw.assignedDriverId : undefined),
+  } as DispatchJob;
 };
 
 const mapZone = (raw: any): DispatchZone => {
@@ -853,7 +984,7 @@ const mapZone = (raw: any): DispatchZone => {
     : [];
 
   return {
-    id: String(raw.id ?? raw.zoneId ?? Math.random()),
+    id: String(raw.id ?? raw.zoneId ?? createId()),
     name: raw.zoneName ?? raw.name ?? "Zone",
     description: raw.description ?? null,
     polygon: coordinates,
@@ -908,11 +1039,27 @@ export const useDispatchController = () => {
   const assignDriverFromStore = useDispatchStore(
     (state) => state.assignDriver
   );
+  const selectedServiceType = useDispatchStore(
+    (state) => state.selectedServiceType
+  );
 
   const isInitialised = useRef(false);
+  // The controller hook is consumed by App AND JobBoard + JobDetailsModal +
+  // JobComposer (they destructure the memoised fetchers). Without a cross-
+  // instance guard every call would run its own initialise() on mount,
+  // multiplying every dashboard endpoint by ~4. `moduleInitKey` lets a single
+  // hook instance per (user,token) pair own the bootstrap; the others reuse
+  // the already-fetched store state.
+  const moduleInitKey = `${user?.id ?? ''}:${token ? token.slice(-8) : ''}`;
   const jobHydrationRequests = useRef<Map<string, Promise<void>>>(new Map());
   const driverRefreshTimer = useRef<NodeJS.Timeout | null>(null);
   const jobCounterRefreshTimer = useRef<NodeJS.Timeout | null>(null);
+  
+  // ✅ FIX: Use ref to capture latest selectedServiceType without causing useCallback recreations
+  const selectedServiceTypeRef = useRef(selectedServiceType);
+  useEffect(() => {
+    selectedServiceTypeRef.current = selectedServiceType;
+  }, [selectedServiceType]);
 
   const fetchDrivers = useCallback(async () => {
     try {
@@ -933,7 +1080,7 @@ export const useDispatchController = () => {
 
       // Add cache busting parameter with enhanced cache control for force refresh
       const cacheBustParam = isForceRefresh
-        ? `force_${Date.now()}_${Math.random()}`
+        ? `force_${Date.now()}_${createId()}`
         : Date.now();
 
       const response = await api.get<any>(AdminUser.GET_ONLINE_DRIVER_LIST, {
@@ -1080,18 +1227,50 @@ export const useDispatchController = () => {
 
   const fetchJobs = useCallback(async () => {
     try {
-      console.log("🔍 [fetchJobs] Fetching jobs from /api/dispatch/jobs");
-      const response = await api.get<any>("/api/dispatch/jobs", {
-        params: {
-          status: DISPATCH_STATUS_QUERY,
-        },
-      });
-      const payload = (response as any)?.data ?? response;
-      const ridesSource = Array.isArray(payload?.data)
-        ? payload.data
-        : Array.isArray(payload)
-        ? payload
-        : [];
+      let ridesSource: any[] | null = null;
+
+      // Try V2 first if available — but skip if we've already learned this
+      // path 404s on the live backend (see apiClient's v2Client interceptor).
+      if (!isV2PathUnsupported('/api/v2/jobs')) {
+        try {
+          const v2Available = await checkV2Availability();
+          if (v2Available) {
+            console.log("🔍 [fetchJobs] V2 available, fetching via /api/v2/jobs", {
+              serviceType: selectedServiceTypeRef.current,
+            });
+            const { data } = await getV2Jobs(
+              selectedServiceTypeRef.current ? { serviceType: selectedServiceTypeRef.current } : {}
+            );
+            const v2List = Array.isArray(data?.jobs)
+              ? data.jobs
+              : Array.isArray(data)
+              ? data
+              : [];
+            ridesSource = v2List.map(mapV2JobToLegacy);
+          }
+        } catch (err: any) {
+          if (err?.response?.status === 404) {
+            // Belt & braces — the interceptor should have already marked it.
+            markV2PathUnsupported('/api/v2/jobs');
+          }
+          console.warn("[fetchJobs] V2 fetch failed, falling back to V1", err?.message);
+        }
+      }
+
+      if (!ridesSource) {
+        console.log("🔍 [fetchJobs] Fetching jobs from /api/dispatch/jobs");
+        const response = await api.get<any>("/api/dispatch/jobs", {
+          params: {
+            status: DISPATCH_STATUS_QUERY,
+          },
+        });
+        const payload = (response as any)?.data ?? response;
+        ridesSource = Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload)
+          ? payload
+          : [];
+      }
 
       console.log("🔍 [fetchJobs] Raw jobs from backend:", {
         totalJobs: ridesSource.length,
@@ -1124,7 +1303,7 @@ export const useDispatchController = () => {
       console.error("[Dispatch] Failed to fetch jobs", error);
       setError("Unable to load jobs.");
     }
-  }, [setJobs, setError]);
+  }, [setJobs, setError]); // ✅ FIX: Removed selectedServiceType - now uses ref
 
   const hydrateJobById = useCallback(
     async (jobId: string, reason: string) => {
@@ -1289,10 +1468,33 @@ export const useDispatchController = () => {
     if (!user || !token || isInitialised.current) {
       return;
     }
-    initialise().finally(() => {
+    // Cross-instance guard: the first consumer for this user+token pair
+    // owns the bootstrap fetch; everyone else waits on its promise and
+    // short-circuits. Eliminates the x4 drivers/zones/counters/jobs fan-out
+    // we were seeing on first load.
+    if (dispatchInitGuard.key !== moduleInitKey) {
+      dispatchInitGuard.key = moduleInitKey;
+      dispatchInitGuard.inFlight = initialise().finally(() => {
+        isInitialised.current = true;
+      });
+    } else if (dispatchInitGuard.inFlight) {
+      dispatchInitGuard.inFlight.finally(() => {
+        isInitialised.current = true;
+      });
+    } else {
+      // Init already completed for this user+token — no-op, store is warm.
       isInitialised.current = true;
-    });
-  }, [user, token, initialise]);
+    }
+  }, [user, token, initialise, moduleInitKey]);
+
+  // Expose a "silent re-sync" to the reconciliation hook so it can heal
+  // transient driver/job drift without bothering the dispatcher with a popup.
+  useEffect(() => {
+    const refetchAll = async () => {
+      await Promise.all([fetchDrivers(), fetchJobs(), fetchJobCounters()]);
+    };
+    return registerDispatchRefetch(refetchAll);
+  }, [fetchDrivers, fetchJobs, fetchJobCounters]);
 
   useEffect(() => {
     useDispatchStore.setState({
@@ -1403,21 +1605,24 @@ export const useDispatchController = () => {
       }
     };
 
-    const handleDriverOffline = (payload: { driverId: string }) => {
-      console.log("[Dispatch] Driver went offline:", payload.driverId);
+    const handleDriverOffline = (payload: { driverId: string; reason?: string }) => {
+      console.log("[Dispatch] Driver went offline:", payload.driverId, "reason:", payload.reason);
       if (payload?.driverId) {
         // ✅ SEAMLESS UPDATE: Remove driver without refreshing entire list
         console.log("[Dispatch] 🔴 Removing offline driver (seamless):", payload.driverId);
         removeDriver(String(payload.driverId));
+        
+        // Show toast notification if driver was kicked
+        if (payload.reason === 'kicked') {
+          toast.info(`Driver has been kicked and logged out`, {
+            duration: 3000,
+          });
+        }
       }
     };
 
     const handleDriverLocationUpdate = (payload: any) => {
-      console.log(
-        `%c[Dispatch] Received driver:location:update`,
-        "color: blue",
-        payload
-      );
+      // Location updates fire every 5s per driver — suppress unless invalid.
       if (!payload?.driverId || !payload?.location) {
         console.warn("[Dispatch] Invalid location update payload", payload);
         return;
@@ -1495,7 +1700,7 @@ export const useDispatchController = () => {
 
     const handleDriverStatusUpdate = (payload: any = {}) => {
       console.log(
-        `%c[Dispatch] Received driver:status:updated`,
+        `%c[Dispatch] Received driver:status:update`,
         "color: green",
         payload
       );
@@ -1511,11 +1716,18 @@ export const useDispatchController = () => {
       
       console.log(`[Dispatch] Status update for driver ${driverId}: ${statusKey} -> ${mappedStatus}`);
 
-      // If driver goes offline, remove them from the list
+      // ⚠️ BUG FIX: Don't remove driver if status is null/unknown - only if explicitly OFFLINE
+      // If mappedStatus is null but driver has "ONLINE" shift, they should stay visible
       if (mappedStatus === "OFFLINE") {
         console.log(`[Dispatch] 🔴 Removing offline driver (seamless): ${driverId}`);
         removeDriver(driverId);
         return;
+      }
+      
+      // If status is unknown/null, don't remove driver - keep them visible
+      if (!mappedStatus) {
+        console.warn(`[Dispatch] ⚠️ Unknown status "${statusKey}" for driver ${driverId} - keeping driver visible`);
+        return; // Keep driver in list with current status
       }
 
       // Find existing driver in store
@@ -1581,7 +1793,7 @@ export const useDispatchController = () => {
       }
     };
 
-    const handleJobProgressUpdated = async (payload: any) => {
+  const handleJobProgressUpdated = async (payload: any) => {
       console.log(
         `%c[Dispatch] Received job:progress:updated`,
         "color: #3b82f6",
@@ -1638,17 +1850,32 @@ export const useDispatchController = () => {
         "RECALLED",
         "CANCELLED",
         "FINISHED",
+        "COMPLETED" as JobStatus, // ✅ FIX: COMPLETED should also reset driver
       ]);
 
       const nextDriverId = resetDriverStatuses.has(status)
         ? undefined
         : (payload.driverId ?? payload.assignedDriverId ?? payload.job?.assignedDriverId ?? existingJob.driverId);
 
+      // Capture offer metadata so the JobBoard can render the live countdown
+      // as soon as the OFFERED transition arrives. If the job moves out of
+      // OFFERED we clear the metadata so the stale countdown doesn't linger.
+      const offerExpiresAt =
+        status === 'OFFERED'
+          ? (payload.expiresAt ?? payload.offerExpiresAt ?? payload.job?.expiresAt ?? payload.job?.offerExpiresAt ?? existingJob.offerExpiresAt)
+          : undefined;
+      const offeredDriverId =
+        status === 'OFFERED'
+          ? (payload.driverId ?? payload.assignedDriverId ?? payload.job?.assignedDriverId ?? nextDriverId ?? existingJob.offeredDriverId)
+          : undefined;
+
       const updatedJob = {
         ...existingJob,
         status,
         rawStatus,
         driverId: nextDriverId,
+        offerExpiresAt,
+        offeredDriverId,
       } as DispatchJob;
 
       updateJob({
@@ -1705,6 +1932,31 @@ export const useDispatchController = () => {
         });
         
         fetchZones();
+      }
+    };
+
+    const handleStopStatusUpdated = (payload: any) => {
+      console.log("%c[Dispatch] Received stop:status", "color: teal", payload);
+      const jobId =
+        payload?.jobId ||
+        payload?.job?.id ||
+        payload?.job?.jobId ||
+        payload?.job?.internalJobId;
+      if (jobId) {
+        hydrateJobById(String(jobId), "stop:status");
+        scheduleJobCountersRefresh();
+      }
+    };
+
+    const handlePodCaptured = (payload: any) => {
+      console.log("%c[Dispatch] Received pod:captured", "color: teal", payload);
+      const jobId =
+        payload?.jobId ||
+        payload?.job?.id ||
+        payload?.job?.jobId ||
+        payload?.job?.internalJobId;
+      if (jobId) {
+        hydrateJobById(String(jobId), "pod:captured");
       }
     };
 
@@ -1796,20 +2048,26 @@ export const useDispatchController = () => {
 
     // Queue Management: Driver changed zones
     const handleDriverZoneChanged = (payload: any) => {
-      console.log(
-        `%c[Dispatch] 📍 Received driver:zone:changed event`,
-        "color: purple; font-weight: bold",
-        payload
-      );
       if (!payload?.driverId) {
         console.warn("[Dispatch] Invalid zone change payload", payload);
         return;
       }
-      
+      // Drop no-op events. The server tightened this on its side, but
+      // older backends or stability-pending pings can still emit
+      // changed:false → would spam the dispatch console with identical
+      // "from X to X" rows. Silently ignore them.
+      if (payload.changed === false || payload.pending === true) return;
+
       // Find existing driver and update their zone
       const drivers = useDispatchStore.getState().drivers;
       const existingDriver = drivers.find(d => d.id === String(payload.driverId));
-      
+      // Skip when the zone actually matches what we already have.
+      if (
+        existingDriver &&
+        (existingDriver.zoneId || null) === (payload.zoneId || null)
+      ) {
+        return;
+      }
       if (existingDriver) {
         // Update existing driver with new zone info
         const updatedDriver: DispatchDriver = {
@@ -1875,16 +2133,105 @@ export const useDispatchController = () => {
       }
     };
 
+    // ⚠️ Driver unreachable: socket room is empty when job was assigned
+    const handleDriverUnreachable = (payload: any) => {
+      console.warn(`[Dispatch] ⚠️ Driver unreachable via socket:`, payload);
+      toast(`⚠️ Driver may not receive this job in real-time. Their app will pick it up via polling.`, {
+        duration: 8000,
+        icon: '⚠️',
+      });
+    };
+
+    // After a socket reconnect the server-side state may have drifted (jobs
+    // assigned / completed, drivers went online/offline) while we were gone.
+    // Re-pull the authoritative lists so the UI matches server reality rather
+    // than the stale pre-disconnect cache. The underlying `fetchJobs` already
+    // prefers V2 and falls back to V1.
+    const handleReconnect = () => {
+      console.log("[Dispatch] 🔌 Socket reconnected — re-syncing full state");
+      Promise.all([
+        fetchDrivers(),
+        fetchZones(),
+        fetchJobs(),
+        fetchJobCounters(),
+      ]).catch((err) => {
+        console.error("[Dispatch] Reconnect re-sync failed", err);
+      });
+    };
+
     // ✅ FIXED: Backend now only sends 'driver:online' (kebab-case) - removed duplicate listeners
       socket.on("driver:online", handleDriverOnline);
       socket.on("driver:offline", handleDriverOffline);
+      socket.on("driver:kicked", handleDriverOffline); // Also handle kicked event
       socket.on("driver:location:update", handleDriverLocationUpdate);
-      socket.on("driver:status:updated", handleDriverStatusUpdate);
+      socket.on("driver:status:update", handleDriverStatusUpdate); // ✅ FIXED: Match backend event name (no 'd')
+      socket.on("driver:status:updated", handleDriverStatusUpdate); // ✅ FIX: Some backend paths use 'updated' suffix
       socket.on("job:data:updated", handleJobDataUpdated);
       socket.on("job:progress:updated", handleJobProgressUpdated);
+      socket.on("job:completed", handleJobProgressUpdated); // ✅ FIX: Handle job completion event
       socket.on("job:recalled", handleJobProgressUpdated); // ✅ NEW: Handle recalled jobs
       socket.on("job:noshow", handleJobProgressUpdated); // ✅ NEW: Handle no-show jobs
-      socket.on("job:rejected", handleJobProgressUpdated); // ✅ NEW: Handle driver rejected job
+      // Driver rejected (or auto-reject on offer-timeout). Surface a toast
+      // to the dispatcher with the driver name + job reference + reason so
+      // they know to act, then fall through to the regular progress handler
+      // so the job row refreshes (status will already be REJECTED).
+      // The module-level `rejectionDedupe` Map (defined at top of file)
+      // collapses the 3 fan-out copies (dispatch_/company_/super_admin
+      // rooms) and any retry replay into a single visible toast.
+      const handleDriverRejection = (payload: any) => {
+        try {
+          const rejectedDriverId = payload?.rejectedDriverId || payload?.driverId;
+          const jobIdCandidate = String(payload?.internalJobId || payload?.jobId || '');
+          // Dedupe on jobId only (not on rejectedAt/reason) — guarantees
+          // we collapse the 3-room fan-out into 1 toast even if payload
+          // fields drift between copies.
+          const dedupeKey = jobIdCandidate || `${rejectedDriverId || ''}|${payload?.rejectedAt || ''}`;
+          const now = Date.now();
+          // GC stale entries
+          for (const [key, ts] of rejectionDedupe) {
+            if (now - ts > REJECTION_DEDUPE_MS) rejectionDedupe.delete(key);
+          }
+          if (rejectionDedupe.has(dedupeKey)) {
+            return handleJobProgressUpdated(payload);
+          }
+          rejectionDedupe.set(dedupeKey, now);
+
+          const drivers = useDispatchStore.getState().drivers;
+          const jobs = useDispatchStore.getState().jobs;
+          const driver = drivers.find(
+            (d: any) => d.id === rejectedDriverId || d.userId === rejectedDriverId
+          );
+          const driverLabel = driver
+            ? (driver.name || `${driver.firstName || ''} ${driver.lastName || ''}`.trim() || `Driver ${String(rejectedDriverId || '').slice(-4)}`)
+            : `Driver ${String(rejectedDriverId || '').slice(-4)}`;
+          const job = jobs.find(
+            (j: any) => j.id === jobIdCandidate || j.reference === jobIdCandidate
+          );
+          const ref = (job?.reference || job?.id || jobIdCandidate || '').toString().slice(-6).toUpperCase();
+          const isTimeout = String(payload?.reason || '').toUpperCase().includes('TIMEOUT');
+          const willRetry = String(payload?.broadcastMode || '').toLowerCase() === 'auto';
+          const tail = willRetry
+            ? ' — auto-dispatching to next driver'
+            : ' — please reassign manually';
+          const message = isTimeout
+            ? `⏱️ ${driverLabel} timed out on job ${ref}${tail}`
+            : `🚫 ${driverLabel} rejected job ${ref}${tail}`;
+          toast(message, { duration: 6000, icon: isTimeout ? '⏱️' : '🚫' });
+
+          const { addNotification } = useDispatchStore.getState();
+          addNotification({
+            type: 'job_rejected',
+            title: isTimeout ? 'Driver offer timed out' : 'Driver rejected job',
+            message,
+            jobId: jobIdCandidate || undefined,
+            severity: 'warning',
+          } as any);
+        } catch (toastErr) {
+          console.warn('[Dispatch] Failed to render reject toast', toastErr);
+        }
+        return handleJobProgressUpdated(payload);
+      };
+      socket.on("job:rejected", handleDriverRejection); // ✅ NEW: Handle driver rejected job
       socket.on("job:accepted", handleJobProgressUpdated); // ✅ NEW: Handle driver accepted job
       socket.on("job:updated", handleJobDataUpdated); // ✅ NEW: Generic job updates
       socket.on("meter:telemetry:update", handleMeterTelemetryUpdate);
@@ -1896,18 +2243,27 @@ export const useDispatchController = () => {
       socket.on("job:video:offer", handleVideoOffer);
       socket.on("job:video:stopped", handleVideoStopped);
       socket.on("job:video:viewer-count", handleVideoViewerCount);
+      socket.on("stop:status", handleStopStatusUpdated);
+      socket.on("pod:captured", handlePodCaptured);
+      socket.on("driver:unreachable", handleDriverUnreachable);
+      // Socket.IO fires `reconnect` on the manager; on the socket itself newer
+      // versions also expose it. Register on both so we work across versions.
+      socket.on("reconnect", handleReconnect);
+      socket.io?.on?.("reconnect", handleReconnect);
 
     return () => {
       // ✅ FIXED: Backend now only sends 'driver:online' (kebab-case) - removed duplicate listeners
       socket.off("driver:online", handleDriverOnline);
       socket.off("driver:offline", handleDriverOffline);
       socket.off("driver:location:update", handleDriverLocationUpdate);
-      socket.off("driver:status:updated", handleDriverStatusUpdate);
+      socket.off("driver:status:update", handleDriverStatusUpdate); // ✅ FIXED: Match backend event name
+      socket.off("driver:status:updated", handleDriverStatusUpdate); // ✅ FIX: Cleanup
       socket.off("job:data:updated", handleJobDataUpdated);
       socket.off("job:progress:updated", handleJobProgressUpdated);
+      socket.off("job:completed", handleJobProgressUpdated); // ✅ FIX: Cleanup
       socket.off("job:recalled", handleJobProgressUpdated); // ✅ NEW: Cleanup
       socket.off("job:noshow", handleJobProgressUpdated); // ✅ NEW: Cleanup
-      socket.off("job:rejected", handleJobProgressUpdated); // ✅ NEW: Cleanup
+      socket.off("job:rejected", handleDriverRejection); // ✅ NEW: Cleanup
       socket.off("job:accepted", handleJobProgressUpdated); // ✅ NEW: Cleanup
       socket.off("job:updated", handleJobDataUpdated); // ✅ NEW: Cleanup
       socket.off("meter:telemetry:update", handleMeterTelemetryUpdate);
@@ -1919,10 +2275,16 @@ export const useDispatchController = () => {
       socket.off("job:video:offer", handleVideoOffer);
       socket.off("job:video:stopped", handleVideoStopped);
       socket.off("job:video:viewer-count", handleVideoViewerCount);
+      socket.off("stop:status", handleStopStatusUpdated);
+      socket.off("pod:captured", handlePodCaptured);
+      socket.off("driver:unreachable", handleDriverUnreachable);
+      socket.off("reconnect", handleReconnect);
+      socket.io?.off?.("reconnect", handleReconnect);
     };
   }, [
     socket,
     fetchDrivers,
+    fetchZones,
     fetchJobs,
     fetchJobCounters,
     removeDriver,

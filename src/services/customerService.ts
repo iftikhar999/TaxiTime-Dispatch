@@ -15,6 +15,14 @@ export interface Customer {
   email: string;
   rideHistory?: number;
   defaultPaymentMethod?: "cash" | "card";
+  savedCard?: {
+    hasCard: boolean;
+    cardLast4: string | null;
+    cardBrand: string | null;
+    cardExpMonth: number | null;
+    cardExpYear: number | null;
+    savedAt: string | null;
+  } | null;
   addresses?: Array<{
     id: string;
     label: string;
@@ -97,5 +105,43 @@ export async function createCustomer(data: {
   } catch (error) {
     console.error("Create customer error:", error);
     throw error;
+  }
+}
+
+/**
+ * Save a card (Stripe PaymentMethod) to a customer profile
+ */
+export async function saveCustomerCard(
+  customerId: string,
+  cardData: {
+    stripePaymentMethodId: string;
+    cardLast4: string;
+    cardBrand?: string;
+    cardExpMonth?: number;
+    cardExpYear?: number;
+  }
+): Promise<void> {
+  try {
+    await api.post(`/api/customers/${customerId}/save-card`, cardData);
+  } catch (error) {
+    console.error("Save customer card error:", error);
+    // Don't throw — this is a best-effort save, job creation should not fail
+  }
+}
+
+/**
+ * Get saved Stripe PaymentMethod ID for a customer (for off-session charging)
+ */
+export async function getCustomerPaymentMethod(
+  customerId: string
+): Promise<{ stripePaymentMethodId: string; cardLast4: string; cardBrand: string } | null> {
+  try {
+    const response = await api.get<{ success: boolean; data: any }>(
+      `/api/customers/${customerId}/payment-method`
+    );
+    return response.data || null;
+  } catch (error) {
+    console.error("Get customer payment method error:", error);
+    return null;
   }
 }

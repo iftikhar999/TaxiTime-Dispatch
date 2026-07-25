@@ -41,7 +41,8 @@ const getGoogleMapsApiKey = () =>
 const NOMINATIM_BASE_URL = "https://nominatim.openstreetmap.org";
 const GOOGLE_PROVIDER: PlaceProvider = "GOOGLE_MAPS";
 const OSM_PROVIDER: PlaceProvider = "OPENSTREETMAP";
-const DEFAULT_COUNTRY_RESTRICTION = undefined;
+// Restrict to Qatar, Pakistan, and New Zealand
+const DEFAULT_COUNTRY_RESTRICTION = { country: ['nz', 'pk', 'qa'] };
 
 const isBrowserEnvironment = () =>
   typeof globalThis !== "undefined" &&
@@ -220,6 +221,7 @@ async function getOpenStreetMapSuggestions(
       addressdetails: "1",
       limit: limit.toString(),
       "accept-language": language,
+      countrycodes: "nz,pk,qa", // Restrict to New Zealand, Pakistan, Qatar
     });
 
     console.log("[GeocodingService] Making OpenStreetMap request:", url);
@@ -332,6 +334,39 @@ export async function getPlaceDetails(
 
 export async function calculateDistance(
   origin: { lat: number; lng: number },
+  destination: { lat: number; lng: number },
+  waypoints?: Array<{ lat: number; lng: number }>
+): Promise<DistanceResult> {
+  try {
+    // If waypoints provided, calculate segment by segment for accurate total
+    if (waypoints && waypoints.length > 0) {
+      const allPoints = [origin, ...waypoints, destination];
+      let totalDistance = 0;
+      let totalDuration = 0;
+      
+      for (let i = 0; i < allPoints.length - 1; i++) {
+        const segResult = await calculateSegmentDistance(allPoints[i], allPoints[i + 1]);
+        totalDistance += segResult.distance;
+        totalDuration += segResult.duration;
+      }
+      
+      return {
+        distance: totalDistance,
+        duration: totalDuration,
+        origin,
+        destination,
+      };
+    }
+    
+    return await calculateSegmentDistance(origin, destination);
+  } catch (error) {
+    console.error("[GeocodingService] Distance calculation error:", error);
+    return calculateHaversineDistance(origin, destination);
+  }
+}
+
+async function calculateSegmentDistance(
+  origin: { lat: number; lng: number },
   destination: { lat: number; lng: number }
 ): Promise<DistanceResult> {
   try {
@@ -388,7 +423,7 @@ export async function calculateDistance(
     if ((import.meta.env?.MODE ?? "").toLowerCase() === "test") {
       console.info("[GeocodingService][TEST] Distance matrix failed:", error);
     }
-    console.error("[GeocodingService] Distance calculation error:", error);
+    console.error("[GeocodingService] Segment distance error:", error);
     return calculateHaversineDistance(origin, destination);
   }
 }

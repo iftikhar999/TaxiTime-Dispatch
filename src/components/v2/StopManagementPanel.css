@@ -1,0 +1,148 @@
+.stop-management-panel {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.stop-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.stop-progress-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.progress-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.progress-bar {
+  width: 120px;
+  height: 8px;
+  background: #eee;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #4caf50;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 12px;
+  color: #666;
+}
+
+.stops-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stop-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s;
+}
+
+.stop-item:hover {
+  background: #f0f0f0;
+}
+
+.stop-item.current {
+  background: #e3f2fd;
+  border: 1px solid #2196f3;
+}
+
+.stop-item.selected {
+  background: #fff3e0;
+  border: 1px solid #ff9800;
+}
+
+.stop-connector {
+  position: absolute;
+  left: 28px;
+  top: -8px;
+  width: 2px;
+  height: 8px;
+}
+
+.stop-marker {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: bold;
+  font-size: 14px;
+  flex-shrink: 0;
+  border: 2px solid transparent;
+}
+
+.stop-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.stop-address {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stop-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.stop-status {
+  font-weight: 500;
+}
+
+.stop-contact {
+  color: #666;
+}
+
+.pod-required {
+  cursor: help;
+}
+
+.stop-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.stop-actions button {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+
+.stop-actions button:hover {
+  background: #e0e0e0;
+}

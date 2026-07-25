@@ -166,7 +166,8 @@ export const getVehicleIconUrl = (
     // Ensure the path starts with /
     const iconPath = customIconPath.startsWith('/') ? customIconPath : `/${customIconPath}`;
     // Return full URL to backend
-    return `${import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:3000'}${iconPath}`;
+    const baseUrl = import.meta.env.PROD ? '' : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000');
+    return `${baseUrl}${iconPath}`;
   }
   
   // Fallback to standard SVG icons

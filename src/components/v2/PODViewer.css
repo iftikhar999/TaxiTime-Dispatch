@@ -1,0 +1,141 @@
+.pod-viewer-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.pod-viewer-modal {
+  background: #fff;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.pod-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #eee;
+}
+
+.pod-viewer-header h3 {
+  margin: 0;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: #666;
+}
+
+.pod-requirements {
+  padding: 16px;
+  background: #f9f9f9;
+  border-bottom: 1px solid #eee;
+}
+
+.pod-requirements h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+
+.requirement-status {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.requirement-status.complete {
+  background: #e8f5e9;
+  color: #4caf50;
+}
+
+.requirement-status.incomplete {
+  background: #fff3e0;
+  color: #ff9800;
+}
+
+.requirement-type {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #666;
+}
+
+.pod-proofs-list {
+  padding: 16px;
+}
+
+.pod-proofs-list h4 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+}
+
+.no-proofs {
+  text-align: center;
+  color: #999;
+  padding: 24px;
+}
+
+.proof-item {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.proof-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px;
+  background: #f5f5f5;
+}
+
+.proof-type {
+  font-weight: 500;
+}
+
+.proof-verified.yes {
+  color: #4caf50;
+}
+
+.proof-verified.no {
+  color: #ff9800;
+}
+
+.proof-content {
+  padding: 12px;
+}
+
+.signature-image,
+.photo-image {
+  max-width: 100%;
+  border-radius: 4px;
+}
+
+.recipient-name,
+.photo-notes {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #666;
+}
+
+.proof-meta {
+  padding: 8px 12px;
+  background: #fafafa;
+  font-size: 12px;
+  color: #999;
+}

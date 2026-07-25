@@ -34,7 +34,7 @@ export const useRealTimeMapTracking = () => {
 
   // 🔌 WebSocket Connection Management
   const connectWebSocket = useCallback(() => {
-    const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080/ws';
+    const wsUrl = import.meta.env.VITE_WS_URL || (import.meta.env.VITE_SOCKET_BASE_URL?.replace('http', 'ws')?.replace('https', 'wss') + '/ws') || 'ws://localhost:8080/ws';
     
     try {
       wsRef.current = new WebSocket(wsUrl);

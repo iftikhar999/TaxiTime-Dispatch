@@ -1,5 +1,6 @@
 import {
   GoogleMap as GoogleMapComponent,
+  Marker as GoogleMarker,
   Polygon as GooglePolygon,
   Polyline as GooglePolyline,
   useJsApiLoader
@@ -7,12 +8,14 @@ import {
 import L, { LatLngTuple } from "leaflet";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Marker as LeafletMarker,
   Polygon as LeafletPolygon,
   Polyline as LeafletPolyline,
   MapContainer,
   TileLayer
 } from "react-leaflet";
 import { MAP_TILE_URL } from "../../config/environment";
+import { getRoute } from "../../services/routingService";
 import { getMapSettings } from "../../services/zoneService";
 import { useDispatchStore } from "../../store/useDispatchStore";
 import {
@@ -163,6 +166,7 @@ const DispatchMap: React.FC = () => {
   });
   const jobDraft = useDispatchStore((state) => state.jobDraft);
   const [mapReady, setMapReady] = useState(false);
+  const [directionsRoute, setDirectionsRoute] = useState<Array<{ lat: number; lng: number }> | null>(null);
   
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [mapSettings, setMapSettings] = useState<{
@@ -433,28 +437,78 @@ const DispatchMap: React.FC = () => {
     return jobDraft.routePath;
   }, [jobDraft]);
 
+  // Fetch real road route from OSRM (free, no API key needed)
+  useEffect(() => {
+    // Build route from pickup → stops → dropoff (not from routePath which may be stale)
+    if (!jobDraft?.pickup) {
+      setDirectionsRoute(null);
+      return;
+    }
+    
+    const origin = { lat: jobDraft.pickup.latitude, lng: jobDraft.pickup.longitude };
+    
+    // Collect stops as waypoints
+    const waypoints = (jobDraft.stops || [])
+      .filter((s: any) => s.latitude && s.longitude)
+      .map((s: any) => ({ lat: s.latitude, lng: s.longitude }));
+    
+    // Need at least a dropoff to route
+    if (!jobDraft.dropoff?.latitude || !jobDraft.dropoff?.longitude) {
+      setDirectionsRoute(null);
+      return;
+    }
+    
+    const destination = { lat: jobDraft.dropoff.latitude, lng: jobDraft.dropoff.longitude };
+
+    getRoute(origin, destination, waypoints)
+      .then((result) => {
+        setDirectionsRoute(result.path);
+      })
+      .catch(() => {
+        setDirectionsRoute(null);
+      });
+  }, [jobDraft?.pickup, jobDraft?.dropoff, jobDraft?.stops]);
+
   const draftMarkers = useMemo(
-    () =>
-      [
-        jobDraft?.pickup
-          ? {
-              type: "pickup" as const,
-              lat: jobDraft.pickup.latitude,
-              lng: jobDraft.pickup.longitude,
-            }
-          : null,
-        jobDraft?.dropoff
-          ? {
-              type: "dropoff" as const,
-              lat: jobDraft.dropoff.latitude,
-              lng: jobDraft.dropoff.longitude,
-            }
-          : null,
-      ].filter(Boolean) as Array<{
-        type: "pickup" | "dropoff";
+    () => {
+      const markers: Array<{
+        type: "pickup" | "dropoff" | "stop";
         lat: number;
         lng: number;
-      }>,
+        label?: string;
+      }> = [];
+      
+      if (jobDraft?.pickup) {
+        markers.push({
+          type: "pickup",
+          lat: jobDraft.pickup.latitude,
+          lng: jobDraft.pickup.longitude,
+        });
+      }
+      
+      if (jobDraft?.stops) {
+        jobDraft.stops.forEach((stop, i) => {
+          if (stop.latitude && stop.longitude) {
+            markers.push({
+              type: "stop",
+              lat: stop.latitude,
+              lng: stop.longitude,
+              label: `${i + 1}`,
+            });
+          }
+        });
+      }
+      
+      if (jobDraft?.dropoff) {
+        markers.push({
+          type: "dropoff",
+          lat: jobDraft.dropoff.latitude,
+          lng: jobDraft.dropoff.longitude,
+        });
+      }
+      
+      return markers;
+    },
     [jobDraft]
   );
 
@@ -648,9 +702,20 @@ const DispatchMap: React.FC = () => {
                     }}
                   />
                 ))}
-              {draftRoute && (
+              {/* Draft Route - Real road path from Google Directions */}
+              {directionsRoute && directionsRoute.length >= 2 ? (
                 <GooglePolyline
-                  key="g-draft-route"
+                  key="g-draft-route-directions"
+                  path={directionsRoute}
+                  options={{
+                    strokeColor: "#7c3aed",
+                    strokeWeight: 5,
+                    strokeOpacity: 0.9,
+                  }}
+                />
+              ) : draftRoute ? (
+                <GooglePolyline
+                  key="g-draft-route-fallback"
                   path={draftRoute.map((coord) => ({
                     lat: coord.lat,
                     lng: coord.lng,
@@ -672,8 +737,59 @@ const DispatchMap: React.FC = () => {
                     ],
                   }}
                 />
-              )}
-              {/* ALL MARKERS REMOVED - ZONES ONLY */}
+              ) : null}
+              {/* Draft Pickup/Dropoff/Stop Markers */}
+              {draftMarkers.map((marker, idx) => {
+                // Pin-shaped marker SVGs
+                if (marker.type === 'pickup') {
+                  const svg = `<svg width="40" height="52" viewBox="0 0 40 52" xmlns="http://www.w3.org/2000/svg"><path d="M20 50 C20 50 38 32 38 18 C38 8 30 0 20 0 C10 0 2 8 2 18 C2 32 20 50 20 50Z" fill="#16a34a" stroke="white" stroke-width="2"/><circle cx="20" cy="18" r="11" fill="white"/><text x="20" y="23" text-anchor="middle" fill="#16a34a" font-size="14" font-weight="bold">P</text></svg>`;
+                  const svgIcon = `data:image/svg+xml;base64,${btoa(svg)}`;
+                  return (
+                    <GoogleMarker
+                      key={`draft-pickup-${idx}`}
+                      position={{ lat: marker.lat, lng: marker.lng }}
+                      icon={{
+                        url: svgIcon,
+                        scaledSize: new google.maps.Size(40, 52),
+                        anchor: new google.maps.Point(20, 50),
+                      }}
+                      zIndex={1000}
+                    />
+                  );
+                }
+                if (marker.type === 'dropoff') {
+                  const svg = `<svg width="40" height="52" viewBox="0 0 40 52" xmlns="http://www.w3.org/2000/svg"><path d="M20 50 C20 50 38 32 38 18 C38 8 30 0 20 0 C10 0 2 8 2 18 C2 32 20 50 20 50Z" fill="#dc2626" stroke="white" stroke-width="2"/><circle cx="20" cy="18" r="11" fill="white"/><text x="20" y="23" text-anchor="middle" fill="#dc2626" font-size="14" font-weight="bold">D</text></svg>`;
+                  const svgIcon = `data:image/svg+xml;base64,${btoa(svg)}`;
+                  return (
+                    <GoogleMarker
+                      key={`draft-dropoff-${idx}`}
+                      position={{ lat: marker.lat, lng: marker.lng }}
+                      icon={{
+                        url: svgIcon,
+                        scaledSize: new google.maps.Size(40, 52),
+                        anchor: new google.maps.Point(20, 50),
+                      }}
+                      zIndex={999}
+                    />
+                  );
+                }
+                // Stop markers - numbered pins
+                const num = marker.label || String(idx);
+                const svg = `<svg width="36" height="46" viewBox="0 0 36 46" xmlns="http://www.w3.org/2000/svg"><path d="M18 44 C18 44 34 28 34 16 C34 7 27 0 18 0 C9 0 2 7 2 16 C2 28 18 44 18 44Z" fill="#f59e0b" stroke="white" stroke-width="2"/><circle cx="18" cy="16" r="10" fill="white"/><text x="18" y="21" text-anchor="middle" fill="#d97706" font-size="14" font-weight="bold">${num}</text></svg>`;
+                const svgIcon = `data:image/svg+xml;base64,${btoa(svg)}`;
+                return (
+                  <GoogleMarker
+                    key={`draft-stop-${idx}`}
+                    position={{ lat: marker.lat, lng: marker.lng }}
+                    icon={{
+                      url: svgIcon,
+                      scaledSize: new google.maps.Size(36, 46),
+                      anchor: new google.maps.Point(18, 44),
+                    }}
+                    zIndex={998}
+                  />
+                );
+              })}
             </GoogleMapComponent>
             );
           }
@@ -759,9 +875,20 @@ const DispatchMap: React.FC = () => {
                     }}
                   />
                 ))}
-              {draftRoute && (
+              {/* Draft Route - Real road path or straight fallback */}
+              {directionsRoute && directionsRoute.length >= 2 ? (
                 <LeafletPolyline
-                  key="draft-route"
+                  key="draft-route-directions"
+                  positions={directionsRoute.map(p => [p.lat, p.lng] as LatLngTuple)}
+                  pathOptions={{
+                    color: "#7c3aed",
+                    weight: 5,
+                    opacity: 0.9,
+                  }}
+                />
+              ) : draftRoute ? (
+                <LeafletPolyline
+                  key="draft-route-fallback"
                   positions={draftRoute.map(
                     (coord) => [coord.lat, coord.lng] as LatLngTuple
                   )}
@@ -772,9 +899,31 @@ const DispatchMap: React.FC = () => {
                     dashArray: "6 6",
                   }}
                 />
-              )}
+              ) : null}
 
-              {/* ALL MARKERS REMOVED - ZONES ONLY */}
+              {/* Draft Pickup/Dropoff/Stop Markers (Leaflet) */}
+              {draftMarkers.map((marker, idx) => {
+                if (marker.type === 'pickup') {
+                  const svg = `<svg width="40" height="52" viewBox="0 0 40 52" xmlns="http://www.w3.org/2000/svg"><path d="M20 50 C20 50 38 32 38 18 C38 8 30 0 20 0 C10 0 2 8 2 18 C2 32 20 50 20 50Z" fill="#16a34a" stroke="white" stroke-width="2"/><circle cx="20" cy="18" r="11" fill="white"/><text x="20" y="23" text-anchor="middle" fill="#16a34a" font-size="14" font-weight="bold">P</text></svg>`;
+                  return (
+                    <LeafletMarker key={`draft-pickup-${idx}`} position={[marker.lat, marker.lng]}
+                      icon={L.divIcon({ html: svg, className: '', iconSize: [40, 52], iconAnchor: [20, 50] })} />
+                  );
+                }
+                if (marker.type === 'dropoff') {
+                  const svg = `<svg width="40" height="52" viewBox="0 0 40 52" xmlns="http://www.w3.org/2000/svg"><path d="M20 50 C20 50 38 32 38 18 C38 8 30 0 20 0 C10 0 2 8 2 18 C2 32 20 50 20 50Z" fill="#dc2626" stroke="white" stroke-width="2"/><circle cx="20" cy="18" r="11" fill="white"/><text x="20" y="23" text-anchor="middle" fill="#dc2626" font-size="14" font-weight="bold">D</text></svg>`;
+                  return (
+                    <LeafletMarker key={`draft-dropoff-${idx}`} position={[marker.lat, marker.lng]}
+                      icon={L.divIcon({ html: svg, className: '', iconSize: [40, 52], iconAnchor: [20, 50] })} />
+                  );
+                }
+                const num = marker.label || String(idx);
+                const svg = `<svg width="36" height="46" viewBox="0 0 36 46" xmlns="http://www.w3.org/2000/svg"><path d="M18 44 C18 44 34 28 34 16 C34 7 27 0 18 0 C9 0 2 7 2 16 C2 28 18 44 18 44Z" fill="#f59e0b" stroke="white" stroke-width="2"/><circle cx="18" cy="16" r="10" fill="white"/><text x="18" y="21" text-anchor="middle" fill="#d97706" font-size="14" font-weight="bold">${num}</text></svg>`;
+                return (
+                  <LeafletMarker key={`draft-stop-${idx}`} position={[marker.lat, marker.lng]}
+                    icon={L.divIcon({ html: svg, className: '', iconSize: [36, 46], iconAnchor: [18, 44] })} />
+                );
+              })}
             </MapContainer>
           );
         })()}

@@ -4,6 +4,8 @@ import { SOCKET_BASE_URL } from "../config/environment";
 export interface DispatchSocketAuth {
   userId: string;
   companyId?: string;
+  /** Pulled from the auth store so we don't hardcode the dispatcher role. */
+  role?: string;
 }
 
 let socket: Socket | null = null;
@@ -31,12 +33,14 @@ export const connectDispatchSocket = (
     console.log("[Socket] Connected to dispatch namespace", {
       userId: credentials.userId,
       companyId: credentials.companyId,
+      role: credentials.role,
     });
 
     socket?.emit("authenticate", {
       userId: credentials.userId,
       companyId: credentials.companyId,
-      role: "DISPATCHER",
+      // Fall back to DISPATCHER only if the caller did not supply a role.
+      role: credentials.role || "DISPATCHER",
     });
 
     if (credentials.companyId) {
@@ -47,6 +51,43 @@ export const connectDispatchSocket = (
       socket?.emit("joinCompany", credentials.companyId);
     }
   });
+
+  // --- Authenticate ack / error listeners ------------------------------------
+  // The backend's /dispatch namespace currently does not emit a success ack,
+  // but its join_super_admin_room / request:* handlers emit a generic `error`
+  // event on unauthorized access. We listen to the common ack names as well
+  // (`authenticated`, `auth:error`) so this works if the backend is hardened
+  // later. On any auth failure we dispatch a browser event so the UI layer
+  // can toast + the caller can disconnect.
+  const handleAuthenticated = () => {
+    console.log("[Socket] Dispatch namespace authentication acknowledged");
+  };
+  const handleAuthError = (payload: any) => {
+    console.error("[Socket] Dispatch namespace auth error", payload);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("dispatch:socket:auth-error", {
+          detail: payload || { message: "Socket authentication failed" },
+        })
+      );
+    }
+    socket?.disconnect();
+  };
+  const handleGenericError = (payload: any) => {
+    // Only treat as an auth failure if the payload looks auth-related;
+    // other handlers use `error` for non-auth problems.
+    const msg = String(payload?.message || "").toLowerCase();
+    if (msg.includes("unauthorized") || msg.includes("auth")) {
+      handleAuthError(payload);
+    }
+  };
+
+  socket.off("authenticated", handleAuthenticated);
+  socket.off("auth:error", handleAuthError);
+  socket.off("error", handleGenericError);
+  socket.on("authenticated", handleAuthenticated);
+  socket.on("auth:error", handleAuthError);
+  socket.on("error", handleGenericError);
 
   return socket;
 };

@@ -1,12 +1,16 @@
 import classNames from "classnames";
 import {
   Activity,
+  AlertTriangle,
   Briefcase,
+  Calendar,
   CheckCircle,
   Clock,
+  Coffee,
   DollarSign,
   Gauge,
   Hash,
+  LogOut,
   MapPin,
   Navigation,
   Phone,
@@ -14,22 +18,33 @@ import {
   Wifi,
   Zap
 } from "lucide-react";
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import { useTheme } from "../../contexts/ThemeContext";
 import { DispatchJob, useDispatchStore } from "../../store/useDispatchStore";
+import api from "../../services/api";
+import {
+  deriveShiftStatus,
+  formatBreakTimer,
+  loadBreakWarningMinutes,
+  useBreakTracking,
+} from "../../hooks/useBreakTracking";
+import ShiftsTodayView from "./ShiftsTodayView";
 
 // Status that means job is complete/no longer active for the driver
 const COMPLETED_JOB_STATUSES = new Set(['FINISHED', 'CANCELLED', 'NOSHOW', 'REJECTED', 'RECALLED', 'UNASSIGNED', 'PENDING']);
 
 // Compact status badges with abbreviations for space efficiency
-const statusConfig: Record<string, { bg: string; text: string; label: string; short: string }> = {
-  AVAILABLE: { bg: "bg-emerald-500", text: "text-emerald-700", label: "Available", short: "AVL" },
-  AWAY: { bg: "bg-amber-500", text: "text-amber-700", label: "Away", short: "AWY" },
-  BUSY: { bg: "bg-red-500", text: "text-red-700", label: "On Ride", short: "BSY" },
-  ROGER: { bg: "bg-blue-500", text: "text-blue-700", label: "Roger", short: "RGR" },
-  ON_THE_WAY: { bg: "bg-indigo-500", text: "text-indigo-700", label: "En Route", short: "OTW" },
-  ARRIVED: { bg: "bg-purple-500", text: "text-purple-700", label: "Arrived", short: "ARV" },
-  OFFLINE: { bg: "bg-gray-400", text: "text-gray-600", label: "Offline", short: "OFF" },
+const statusConfig: Record<string, { bg: string; text: string; label: string; short: string; rowBgLight: string; rowBgDark: string }> = {
+  AVAILABLE: { bg: "bg-emerald-500", text: "text-emerald-700", label: "Available", short: "AVL", rowBgLight: "bg-emerald-50/60", rowBgDark: "bg-emerald-900/20" },
+  AWAY: { bg: "bg-amber-500", text: "text-amber-700", label: "Away", short: "AWY", rowBgLight: "bg-orange-50/60", rowBgDark: "bg-orange-900/20" },
+  BUSY: { bg: "bg-red-500", text: "text-red-700", label: "On Ride", short: "BSY", rowBgLight: "bg-red-50/60", rowBgDark: "bg-red-900/20" },
+  ROGER: { bg: "bg-blue-400", text: "text-blue-700", label: "Roger", short: "RGR", rowBgLight: "bg-blue-100", rowBgDark: "bg-blue-900/40" },
+  ASSIGNED: { bg: "bg-blue-400", text: "text-blue-700", label: "Roger", short: "RGR", rowBgLight: "bg-blue-100", rowBgDark: "bg-blue-900/40" },
+  ON_THE_WAY: { bg: "bg-indigo-500", text: "text-indigo-700", label: "On the Way", short: "OTW", rowBgLight: "bg-indigo-100", rowBgDark: "bg-indigo-900/40" },
+  ARRIVED: { bg: "bg-orange-500", text: "text-orange-700", label: "Arrived", short: "ARV", rowBgLight: "bg-orange-100", rowBgDark: "bg-orange-900/40" },
+  STARTED: { bg: "bg-red-600", text: "text-red-800", label: "Active", short: "ACT", rowBgLight: "bg-red-100/70", rowBgDark: "bg-red-800/30" },
+  ACTIVE: { bg: "bg-red-600", text: "text-red-800", label: "Active", short: "ACT", rowBgLight: "bg-red-100/70", rowBgDark: "bg-red-800/30" },
+  OFFLINE: { bg: "bg-gray-400", text: "text-gray-600", label: "Offline", short: "OFF", rowBgLight: "bg-slate-50/40", rowBgDark: "bg-slate-800/60" },
 };
 
 const formatRelativeTime = (iso?: string) => {
@@ -64,6 +79,63 @@ const DriverStatusPanel: React.FC = () => {
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [zoneFilter, setZoneFilter] = React.useState<string | null>(null);
   const [tick, setTick] = React.useState(0);
+  
+  // Kick driver state
+  const [kickingDriverId, setKickingDriverId] = useState<string | null>(null);
+  const [kickConfirmId, setKickConfirmId] = useState<string | null>(null);
+  const [pendingKicks, setPendingKicks] = useState<Set<string>>(new Set());
+
+  // Shift / break tracking — Wave 2D
+  const { getBreakElapsedSec } = useBreakTracking();
+  const breakWarnMin = loadBreakWarningMinutes();
+  const [showShiftsView, setShowShiftsView] = useState(false);
+
+  // Kick driver handler
+  const handleKickDriver = async (driverId: string, driverName: string) => {
+    setKickingDriverId(driverId);
+    try {
+      const response = await api.post<{
+        success: boolean;
+        message: string;
+        status: 'kicked' | 'pending';
+        activeJobId?: string;
+      }>(`/api/dispatch/drivers/${driverId}/kick`, {
+        reason: 'Kicked by dispatcher'
+      });
+      
+      if (response.success) {
+        if (response.status === 'pending') {
+          // Driver has active job - kick is pending
+          setPendingKicks(prev => new Set(prev).add(driverId));
+          alert(`${driverName} has an active job. They will be kicked once the job completes.`);
+        } else {
+          // Driver kicked immediately
+          alert(`${driverName} has been kicked and logged out.`);
+        }
+      }
+    } catch (error: any) {
+      console.error('Failed to kick driver:', error);
+      alert(error?.response?.data?.message || 'Failed to kick driver');
+    } finally {
+      setKickingDriverId(null);
+      setKickConfirmId(null);
+    }
+  };
+
+  // Cancel pending kick
+  const handleCancelPendingKick = async (driverId: string) => {
+    try {
+      await api.delete(`/api/dispatch/drivers/${driverId}/kick`);
+      setPendingKicks(prev => {
+        const next = new Set(prev);
+        next.delete(driverId);
+        return next;
+      });
+    } catch (error: any) {
+      console.error('Failed to cancel pending kick:', error);
+      alert(error?.response?.data?.message || 'Failed to cancel pending kick');
+    }
+  };
 
   // Real-time counter - tick every second
   React.useEffect(() => {
@@ -78,6 +150,21 @@ const DriverStatusPanel: React.FC = () => {
       // Only include jobs that are not completed
       if (!COMPLETED_JOB_STATUSES.has(job.status)) {
         map.set(job.id, job);
+        // Also index by reference (public jobId) for cross-referencing
+        if (job.reference && job.reference !== job.id) {
+          map.set(job.reference, job);
+        }
+      }
+    }
+    return map;
+  }, [jobs]);
+
+  // Map driver ID to their active job (fallback when currentJobId is missing)
+  const driverJobMap = React.useMemo(() => {
+    const map = new Map<string, DispatchJob>();
+    for (const job of jobs) {
+      if (!COMPLETED_JOB_STATUSES.has(job.status) && job.driverId) {
+        map.set(job.driverId, job);
       }
     }
     return map;
@@ -132,21 +219,40 @@ const DriverStatusPanel: React.FC = () => {
 
   const stats = React.useMemo(() => ({
     available: drivers.filter(d => d.status === "AVAILABLE").length,
-    busy: drivers.filter(d => d.status === "BUSY").length,
+    busy: drivers.filter(d => d.status === "BUSY" || d.status === "ON_THE_WAY" || d.status === "ARRIVED").length,
     away: drivers.filter(d => d.status === "AWAY").length,
+    roger: drivers.filter(d => d.status === "ROGER" || d.status === "ASSIGNED").length,
     total: activeDrivers.length,
   }), [drivers, activeDrivers]);
 
   // Helper to render driver row content
   const renderDriverRow = (driver: typeof drivers[0], index: number) => {
-    const status = statusConfig[driver.status] || statusConfig.OFFLINE;
+    // Get current job details - only if not completed
+    const rawJob = driver.currentJobId ? jobsMap.get(driver.currentJobId) : null;
+    // Fallback: look up job by driverId if currentJobId lookup fails
+    const currentJob = (rawJob && !COMPLETED_JOB_STATUSES.has(rawJob.status) ? rawJob : null)
+      || driverJobMap.get(driver.id)
+      || null;
+
+    // Derive display status from job status when driver has an active job
+    const getDisplayStatus = () => {
+      if (currentJob) {
+        const jobStatus = currentJob.status;
+        if (jobStatus === "ASSIGNED") return "ROGER";
+        if (jobStatus === "ON_THE_WAY") return "ON_THE_WAY";
+        if (jobStatus === "ARRIVED") return "ARRIVED";
+        if (jobStatus === "ACTIVE" || jobStatus === "STARTED") return "ACTIVE";
+      }
+      if (driver.status === "ASSIGNED") return "ROGER";
+      if (driver.status === "ROGER") return "ROGER";
+      return driver.status;
+    };
+    const displayStatus = getDisplayStatus();
+    const status = statusConfig[displayStatus] || statusConfig.OFFLINE;
     const vehicleInfo = typeof driver.vehicle === 'string' 
       ? driver.vehicle 
       : driver.vehicle?.plateNumber || '—';
     
-    // Get current job details - only if not completed
-    const rawJob = driver.currentJobId ? jobsMap.get(driver.currentJobId) : null;
-    const currentJob = rawJob && !COMPLETED_JOB_STATUSES.has(rawJob.status) ? rawJob : null;
     const jobFare = currentJob?.fareEstimate || currentJob?.actualFare || currentJob?.finalAmount;
     
     // Get today's stats for this driver
@@ -173,6 +279,12 @@ const DriverStatusPanel: React.FC = () => {
     // Speed display
     const speed = driver.speedKmh ?? 0;
 
+    // Shift / break tracking (Wave 2D)
+    const shiftStatus = deriveShiftStatus(driver.status);
+    const breakElapsedSec = shiftStatus === "ON_BREAK" ? getBreakElapsedSec(driver.id) : null;
+    const breakWarn =
+      breakElapsedSec != null && breakElapsedSec >= breakWarnMin * 60;
+
     // Time color helper
     const getTimeColor = () => {
       if (timeSinceUpdate === '—') return isDark ? "text-slate-500" : "text-slate-300";
@@ -189,8 +301,8 @@ const DriverStatusPanel: React.FC = () => {
         className={classNames(
           "grid grid-cols-[minmax(100px,1.3fr)_45px_minmax(70px,1fr)_minmax(100px,1.4fr)_minmax(55px,0.8fr)_35px] lg:grid-cols-[minmax(140px,1.4fr)_55px_minmax(85px,1fr)_minmax(150px,1.6fr)_minmax(75px,0.9fr)_45px] gap-0.5 lg:gap-1 px-1.5 lg:px-2 py-1.5 lg:py-2.5 items-center border-b cursor-pointer transition-all",
           isDark 
-            ? `border-slate-700 ${index % 2 === 0 ? "bg-slate-800" : "bg-slate-800/60"} hover:bg-slate-700`
-            : `border-slate-100 ${index % 2 === 0 ? "bg-white" : "bg-slate-50/40"} hover:bg-indigo-50/60`
+            ? `border-slate-700 ${status.rowBgDark} hover:bg-slate-700`
+            : `border-slate-100 ${status.rowBgLight} hover:bg-indigo-50/60`
         )}
         onMouseEnter={() => {
           if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
@@ -242,14 +354,49 @@ const DriverStatusPanel: React.FC = () => {
                 </span>
               )}
             </div>
-            {/* Last update time */}
-            <div className="flex items-center gap-1 mt-0.5">
+            {/* Last update time + shift/break indicator */}
+            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               <Clock className={classNames(
                 "w-2 lg:w-2.5 h-2 lg:h-2.5",
                 isDark ? "text-slate-500" : "text-slate-300"
               )} />
               <span className={classNames("text-[7px] lg:text-[8px] font-medium", getTimeColor())}>
                 {timeSinceUpdate}
+              </span>
+              {/* Shift status chip — always shown */}
+              <span
+                className={classNames(
+                  "ml-1 inline-flex items-center gap-0.5 px-1 py-0 rounded text-[7px] lg:text-[8px] font-bold uppercase leading-tight",
+                  shiftStatus === "ON_SHIFT" &&
+                    (isDark
+                      ? "bg-emerald-500/20 text-emerald-300"
+                      : "bg-emerald-50 text-emerald-700"),
+                  shiftStatus === "ON_BREAK" &&
+                    (breakWarn
+                      ? "bg-red-500 text-white animate-pulse"
+                      : isDark
+                      ? "bg-amber-500/20 text-amber-300"
+                      : "bg-amber-50 text-amber-700"),
+                  shiftStatus === "OFF_SHIFT" &&
+                    (isDark ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500")
+                )}
+                title={
+                  shiftStatus === "ON_BREAK" && breakElapsedSec != null
+                    ? `On break ${formatBreakTimer(breakElapsedSec)}${breakWarn ? " — over threshold" : ""}`
+                    : shiftStatus
+                }
+              >
+                {shiftStatus === "ON_BREAK" ? (
+                  <>
+                    <Coffee className="w-2 h-2" />
+                    {breakElapsedSec != null ? formatBreakTimer(breakElapsedSec) : "Break"}
+                    {breakWarn && <AlertTriangle className="w-2 h-2" />}
+                  </>
+                ) : shiftStatus === "ON_SHIFT" ? (
+                  "On shift"
+                ) : (
+                  "Off shift"
+                )}
               </span>
             </div>
           </div>
@@ -259,11 +406,15 @@ const DriverStatusPanel: React.FC = () => {
         <div className="flex justify-center">
           <span className={classNames(
             "px-1.5 lg:px-2 py-0.5 lg:py-1 rounded-md text-[9px] lg:text-[10px] font-bold leading-none",
-            driver.status === "AVAILABLE" && "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30",
-            driver.status === "BUSY" && "bg-red-500/20 text-red-400 border border-red-500/30",
-            driver.status === "AWAY" && "bg-amber-500/20 text-amber-400 border border-amber-500/30",
-            driver.status === "OFFLINE" && (isDark ? "bg-slate-600/20 text-slate-400 border border-slate-600/30" : "bg-slate-100 text-slate-500"),
-            !["AVAILABLE", "BUSY", "AWAY", "OFFLINE"].includes(driver.status) && "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+            displayStatus === "AVAILABLE" && (isDark ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "bg-green-100 text-green-700 border border-green-300"),
+            displayStatus === "BUSY" && (isDark ? "bg-red-500/20 text-red-400 border border-red-500/30" : "bg-red-100 text-red-700 border border-red-300"),
+            displayStatus === "AWAY" && (isDark ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" : "bg-orange-100 text-orange-700 border border-orange-300"),
+            displayStatus === "ROGER" && (isDark ? "bg-blue-400/20 text-blue-400 border border-blue-400/30" : "bg-blue-100 text-blue-700 border border-blue-300"),
+            displayStatus === "ON_THE_WAY" && (isDark ? "bg-indigo-500/25 text-indigo-300 border border-indigo-500/40" : "bg-indigo-100 text-indigo-700 border border-indigo-300"),
+            displayStatus === "ARRIVED" && (isDark ? "bg-orange-500/25 text-orange-300 border border-orange-500/40" : "bg-orange-100 text-orange-700 border border-orange-300"),
+            (displayStatus === "STARTED" || displayStatus === "ACTIVE") && (isDark ? "bg-red-600/25 text-red-300 border border-red-600/40" : "bg-red-200 text-red-800 border border-red-400"),
+            displayStatus === "OFFLINE" && (isDark ? "bg-slate-600/20 text-slate-400 border border-slate-600/30" : "bg-slate-100 text-slate-500 border border-slate-300"),
+            !["AVAILABLE", "BUSY", "AWAY", "OFFLINE", "ROGER", "ON_THE_WAY", "ARRIVED", "STARTED", "ACTIVE"].includes(displayStatus) && (isDark ? "bg-slate-500/20 text-slate-400 border border-slate-500/30" : "bg-slate-100 text-slate-600 border border-slate-300")
           )}>
             {status.short}
           </span>
@@ -323,12 +474,14 @@ const DriverStatusPanel: React.FC = () => {
               <div className="flex items-center gap-1 lg:gap-1.5">
                 <span className={classNames(
                   "text-[7px] lg:text-[8px] px-1 lg:px-1.5 py-0.5 rounded font-medium",
-                  currentJob.status === 'ACTIVE' && "bg-blue-500/20 text-blue-400",
-                  currentJob.status === 'ASSIGNED' && "bg-purple-500/20 text-purple-400",
+                  (currentJob.status === 'ACTIVE' || currentJob.status === 'STARTED') && "bg-red-500/20 text-red-400",
+                  currentJob.status === 'ASSIGNED' && "bg-blue-400/20 text-blue-400",
+                  currentJob.status === 'ON_THE_WAY' && "bg-indigo-500/20 text-indigo-400",
+                  currentJob.status === 'ARRIVED' && "bg-orange-500/20 text-orange-400",
                   currentJob.status === 'OFFERED' && "bg-amber-500/20 text-amber-400",
-                  !['ACTIVE', 'ASSIGNED', 'OFFERED'].includes(currentJob.status) && (isDark ? "bg-slate-600/20 text-slate-400" : "bg-slate-100 text-slate-600")
+                  !['ACTIVE', 'STARTED', 'ASSIGNED', 'ON_THE_WAY', 'ARRIVED', 'OFFERED'].includes(currentJob.status) && (isDark ? "bg-slate-600/20 text-slate-400" : "bg-slate-100 text-slate-600")
                 )}>
-                  {currentJob.status}
+                  {currentJob.status === 'ASSIGNED' ? 'ROGER' : currentJob.status === 'ON_THE_WAY' ? 'On the Way' : currentJob.status === 'ARRIVED' ? 'Arrived' : currentJob.status}
                 </span>
               </div>
             </div>
@@ -405,6 +558,69 @@ const DriverStatusPanel: React.FC = () => {
               <Navigation className="w-3 lg:w-3.5 h-3 lg:h-3.5" />
             </button>
           )}
+          
+          {/* Kick Driver Button */}
+          {kickConfirmId === driver.id ? (
+            <div className="flex items-center gap-0.5">
+              <button 
+                className={classNames(
+                  "px-1 py-0.5 text-[9px] lg:text-[10px] rounded transition-colors font-medium",
+                  "bg-red-500 text-white hover:bg-red-600"
+                )}
+                disabled={kickingDriverId === driver.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleKickDriver(driver.id, driver.name || 'Driver');
+                }}
+              >
+                {kickingDriverId === driver.id ? '...' : 'Yes'}
+              </button>
+              <button 
+                className={classNames(
+                  "px-1 py-0.5 text-[9px] lg:text-[10px] rounded transition-colors font-medium",
+                  isDark 
+                    ? "bg-slate-600 text-slate-200 hover:bg-slate-500" 
+                    : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                )}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setKickConfirmId(null);
+                }}
+              >
+                No
+              </button>
+            </div>
+          ) : pendingKicks.has(driver.id) ? (
+            <button 
+              className={classNames(
+                "p-0.5 lg:p-1 rounded-md transition-colors",
+                "text-amber-500 hover:text-amber-400 hover:bg-amber-500/20"
+              )}
+              title="Pending kick - click to cancel"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleCancelPendingKick(driver.id);
+              }}
+            >
+              <LogOut className="w-3 lg:w-3.5 h-3 lg:h-3.5" />
+            </button>
+          ) : (
+            <button 
+              className={classNames(
+                "p-0.5 lg:p-1 rounded-md transition-colors",
+                isDark 
+                  ? "text-slate-400 hover:text-red-400 hover:bg-red-500/20" 
+                  : "text-slate-400 hover:text-red-600 hover:bg-red-100"
+              )}
+              title="Kick driver"
+              onClick={(e) => {
+                e.stopPropagation();
+                setKickConfirmId(driver.id);
+              }}
+            >
+              <LogOut className="w-3 lg:w-3.5 h-3 lg:h-3.5" />
+            </button>
+          )}
         </div>
       </div>
     );
@@ -417,40 +633,67 @@ const DriverStatusPanel: React.FC = () => {
     )}>
       {/* Header - Compact */}
       <div className={classNames(
-        "border-b px-2 py-1",
-        isDark ? "bg-slate-700/50 border-slate-600" : "bg-slate-50 border-slate-200"
+        "border-b px-2.5 py-1.5",
+        isDark ? "bg-slate-800/80 border-slate-600" : "bg-white border-slate-200"
       )}>
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <span className={classNames(
-              "text-[10px] font-medium",
+              "text-[11px] font-semibold",
               isDark ? "text-slate-200" : "text-slate-700"
-            )}>Fleet ({stats.total})</span>
+            )}>Fleet</span>
+            <span className={classNames(
+              "inline-flex items-center justify-center min-w-[20px] h-[18px] rounded-md text-[10px] font-bold tabular-nums",
+              isDark ? "bg-slate-600 text-slate-200" : "bg-slate-200 text-slate-700"
+            )}>{stats.total}</span>
+            <button
+              onClick={() => setShowShiftsView(true)}
+              className={classNames(
+                "inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium",
+                isDark
+                  ? "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              )}
+              title="View today's shifts"
+            >
+              <Calendar className="w-2.5 h-2.5" />
+              Shifts
+            </button>
           </div>
           
-          {/* Stats Pills - Compact */}
-          <div className="flex items-center gap-1 text-[8px] font-normal">
+          {/* Stats Pills - Better visual hierarchy */}
+          <div className="flex items-center gap-1.5">
             <span className={classNames(
-              "flex items-center gap-0.5 px-1.5 py-0.5 rounded",
+              "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-semibold tabular-nums",
               isDark 
-                ? "bg-emerald-900/30 text-emerald-400" 
-                : "bg-emerald-50 text-emerald-600"
+                ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20" 
+                : "bg-emerald-50 text-emerald-600 border border-emerald-200"
             )}>
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />{stats.available}
             </span>
+            {stats.roger > 0 && (
+              <span className={classNames(
+                "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-semibold tabular-nums",
+                isDark 
+                  ? "bg-blue-500/15 text-blue-400 border border-blue-500/20" 
+                  : "bg-blue-50 text-blue-600 border border-blue-200"
+              )}>
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />{stats.roger}
+              </span>
+            )}
             <span className={classNames(
-              "flex items-center gap-0.5 px-1.5 py-0.5 rounded",
+              "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-semibold tabular-nums",
               isDark 
-                ? "bg-red-900/30 text-red-400" 
-                : "bg-red-50 text-red-600"
+                ? "bg-red-500/15 text-red-400 border border-red-500/20" 
+                : "bg-red-50 text-red-600 border border-red-200"
             )}>
               <span className="w-1.5 h-1.5 rounded-full bg-red-500" />{stats.busy}
             </span>
             <span className={classNames(
-              "flex items-center gap-0.5 px-1.5 py-0.5 rounded",
+              "flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-semibold tabular-nums",
               isDark 
-                ? "bg-amber-900/30 text-amber-400" 
-                : "bg-amber-50 text-amber-600"
+                ? "bg-amber-500/15 text-amber-400 border border-amber-500/20" 
+                : "bg-amber-50 text-amber-600 border border-amber-200"
             )}>
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />{stats.away}
             </span>
@@ -493,10 +736,10 @@ const DriverStatusPanel: React.FC = () => {
         )}
       </div>
 
-      {/* Table Header - Compact */}
+      {/* Table Header */}
       <div className={classNames(
-        "border-b px-1.5 py-1 grid grid-cols-[minmax(100px,1.3fr)_45px_minmax(70px,1fr)_minmax(100px,1.4fr)_minmax(55px,0.8fr)_35px] lg:grid-cols-[minmax(140px,1.4fr)_55px_minmax(85px,1fr)_minmax(150px,1.6fr)_minmax(75px,0.9fr)_45px] gap-0.5 text-[7px] font-medium uppercase tracking-wide",
-        isDark ? "bg-slate-700/30 border-slate-600 text-slate-400" : "bg-slate-100 border-slate-200 text-slate-500"
+        "border-b px-1.5 py-1 grid grid-cols-[minmax(100px,1.3fr)_45px_minmax(70px,1fr)_minmax(100px,1.4fr)_minmax(55px,0.8fr)_35px] lg:grid-cols-[minmax(140px,1.4fr)_55px_minmax(85px,1fr)_minmax(150px,1.6fr)_minmax(75px,0.9fr)_45px] gap-0.5 text-[8px] font-semibold uppercase tracking-wider",
+        isDark ? "bg-slate-700/30 border-slate-600 text-slate-500" : "bg-slate-50 border-slate-200 text-slate-400"
       )}>
         <div className="flex items-center gap-1">
           <User className="w-2.5 lg:w-3 h-2.5 lg:h-3" />Driver
@@ -530,6 +773,9 @@ const DriverStatusPanel: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Shifts today modal */}
+      <ShiftsTodayView open={showShiftsView} onClose={() => setShowShiftsView(false)} />
     </div>
   );
 };

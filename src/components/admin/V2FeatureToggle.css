@@ -1,0 +1,90 @@
+.v2-toggle-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fff;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+}
+
+.v2-toggle-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.v2-toggle-header h3 {
+  margin: 0;
+}
+
+.v2-toggle-header p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.v2-toggle-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.v2-toggle-actions button {
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.v2-toggle-actions .danger {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.v2-toggle-warning {
+  margin: 12px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 13px;
+}
+
+.v2-toggle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.v2-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.v2-toggle-row .label {
+  font-weight: 600;
+}
+
+.v2-toggle-row .sub {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.v2-toggle-footer {
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.v2-toggle-footer .on {
+  color: #16a34a;
+}
+
+.v2-toggle-footer .off {
+  color: #dc2626;
+}

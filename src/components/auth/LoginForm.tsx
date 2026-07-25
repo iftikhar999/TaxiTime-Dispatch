@@ -4,8 +4,8 @@ import { authService } from "../../services/authService";
 import { useAuthStore } from "../../store/useAuthStore";
 
 const LoginForm: React.FC = () => {
-  const [email, setEmail] = useState("dispatch@citycabs.com");
-  const [password, setPassword] = useState("dispatch123");
+  const [email, setEmail] = useState("dispatch@citytaxi.com");
+  const [password, setPassword] = useState("changepassword");
 
   // Use separate selectors to avoid infinite loop
   const setCredentials = useAuthStore((state) => state.setCredentials);
@@ -15,8 +15,8 @@ const LoginForm: React.FC = () => {
   const error = useAuthStore((state) => state.error);
 
   const useDemoCredentials = () => {
-    setEmail("dispatch@citycabs.com");
-    setPassword("dispatch123");
+    setEmail("dispatch@citytaxi.com");
+    setPassword("changepassword");
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -100,7 +100,7 @@ const LoginForm: React.FC = () => {
             disabled={loading}
             className="w-full rounded-md border border-slate-300 bg-slate-50 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Use City Cabs Demo Credentials
+            Use City Taxi Demo Credentials
           </button>
         </form>
         <p className="mt-6 text-center text-[11px] text-slate-500">

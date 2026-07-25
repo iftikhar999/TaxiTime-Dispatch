@@ -1,9 +1,15 @@
 import {
+    AlertTriangle,
     Bell,
+    Car,
+    DollarSign,
     GripHorizontal,
+    Layers,
+    Map as MapIcon,
     Moon,
     RotateCcw,
     Sun,
+    Users,
     X,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -13,6 +19,16 @@ import "react-resizable/css/styles.css";
 import { useTheme } from "../../contexts/ThemeContext";
 import { usePanelLayout } from "../../hooks/usePanelLayout";
 import { useDispatchStore } from "../../store/useDispatchStore";
+import { useEmergencyStore } from "../../store/useEmergencyStore";
+import { useAuthStore } from "../../store/useAuthStore";
+import AutoPilotToggle from "../dispatch/AutoPilotToggle";
+import EmergencyPanel from "../emergencies/EmergencyPanel";
+import RefundListView from "../refunds/RefundListView";
+
+// Roles allowed to operate the refunds flow. Matches the backend allowlist in
+// routes/admin-refunds.js (`authorizeRoles('SUPER_ADMIN','COMPANY_ADMIN','ADMIN')`).
+// DISPATCHER/OWNER don't issue refunds — finance-sensitive action.
+const REFUND_ROLES = new Set(["SUPER_ADMIN", "COMPANY_ADMIN", "ADMIN"]);
 
 interface ResizableDispatchLayoutProps {
   dispatcherName?: string;
@@ -24,6 +40,7 @@ interface ResizableDispatchLayoutProps {
   map: React.ReactNode;
   jobCreation: React.ReactNode;
   showJobCreation: boolean;
+  isEditMode?: boolean;
   onCloseJobCreation: () => void;
 }
 
@@ -37,6 +54,7 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
   map,
   jobCreation,
   showJobCreation,
+  isEditMode = false,
   onCloseJobCreation,
 }) => {
   // Theme
@@ -66,6 +84,19 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
   // Notification dropdown state
   const [showNotifications, setShowNotifications] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
+
+  // Wave 2D — emergency + refunds
+  const emergencies = useEmergencyStore((s) => s.emergencies);
+  const activeEmergencyCount = emergencies.filter((e) => e.status === "ACTIVE").length;
+  const [showEmergencyPanel, setShowEmergencyPanel] = useState(false);
+  const [showRefundListView, setShowRefundListView] = useState(false);
+  const currentUser = useAuthStore((s) => s.user);
+  const canSeeRefunds = !!(currentUser?.role && REFUND_ROLES.has(currentUser.role));
+  // Pulse animation trigger when count rises
+  const prevActiveCountRef = useRef(activeEmergencyCount);
+  useEffect(() => {
+    prevActiveCountRef.current = activeEmergencyCount;
+  }, [activeEmergencyCount]);
 
   // Draggable modal state
   const [position, setPosition] = useState({ x: 100, y: 80 });
@@ -145,7 +176,7 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
         const newX = e.clientX - dragOffset.x;
         const newY = e.clientY - dragOffset.y;
 
-        const maxX = window.innerWidth - 420;
+        const maxX = window.innerWidth - 520;
         const maxY = window.innerHeight - 100;
 
         setPosition({
@@ -188,33 +219,38 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
     >
       {/* Header */}
       <header
-        className={`flex flex-wrap items-center justify-between border-b px-3 md:px-4 lg:px-6 py-2 shadow-sm z-10 gap-2 transition-colors duration-300 ${
+        className={`flex flex-wrap items-center justify-between border-b px-3 md:px-4 lg:px-5 py-1.5 shadow-sm z-10 gap-2 transition-colors duration-300 ${
           isDark
             ? "bg-gray-800 border-gray-700"
             : "bg-white border-slate-200"
         }`}
       >
-        <div className="flex-shrink-0">
-          <h1
-            className={`text-base lg:text-lg font-semibold tracking-tight ${
-              isDark ? "text-white" : "text-slate-900"
-            }`}
-          >
-            TaxiTime Dispatch Console
-          </h1>
-          <p
-            className={`text-[10px] lg:text-xs hidden sm:block ${
-              isDark ? "text-gray-400" : "text-slate-500"
-            }`}
-          >
-            Monitor jobs, drivers, and zones in real time
-          </p>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <div>
+            <h1
+              className={`text-sm lg:text-base font-bold tracking-tight ${
+                isDark ? "text-white" : "text-slate-900"
+              }`}
+            >
+              TaxiTime <span className={isDark ? "text-blue-400" : "text-blue-600"}>Dispatch</span>
+            </h1>
+            <p
+              className={`text-[9px] lg:text-[10px] hidden sm:block ${
+                isDark ? "text-gray-400" : "text-slate-400"
+              }`}
+            >
+              Monitor jobs, drivers, and zones in real time
+            </p>
+          </div>
         </div>
         <div
           className={`flex items-center gap-2 lg:gap-3 text-[10px] lg:text-xs flex-wrap ${
             isDark ? "text-gray-300" : "text-slate-700"
           }`}
         >
+          {/* Auto-Pilot — premium feature, hidden when company isn't entitled */}
+          <AutoPilotToggle isDark={isDark} />
+
           {/* Theme Toggle */}
           <button
             onClick={toggleTheme}
@@ -244,6 +280,47 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           >
             <RotateCcw size={16} className="lg:w-[18px] lg:h-[18px]" />
           </button>
+
+          {/* Wave 2D — SOS/Emergency badge */}
+          <button
+            onClick={() => setShowEmergencyPanel(true)}
+            className={`relative rounded-full p-1.5 lg:p-2 transition ${
+              activeEmergencyCount > 0
+                ? "text-white bg-red-600 hover:bg-red-700 animate-pulse"
+                : isDark
+                ? "text-gray-400 hover:bg-gray-700"
+                : "text-slate-600 hover:bg-slate-100"
+            }`}
+            title={
+              activeEmergencyCount > 0
+                ? `${activeEmergencyCount} active emergency${activeEmergencyCount > 1 ? "ies" : ""}`
+                : "Emergency alerts"
+            }
+          >
+            <AlertTriangle size={18} className="lg:w-5 lg:h-5" />
+            {activeEmergencyCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 lg:h-5 lg:w-5 items-center justify-center rounded-full bg-white text-[9px] lg:text-[10px] font-bold text-red-600">
+                {activeEmergencyCount > 9 ? "9+" : activeEmergencyCount}
+              </span>
+            )}
+          </button>
+
+          {/* Wave 2D — Refunds view. Hidden for roles the backend would
+               reject anyway (DISPATCHER/OWNER) — avoids the useless
+               "Insufficient permissions" message. */}
+          {canSeeRefunds && (
+            <button
+              onClick={() => setShowRefundListView(true)}
+              className={`rounded-full p-1.5 lg:p-2 transition ${
+                isDark
+                  ? "text-gray-400 hover:bg-gray-700 hover:text-emerald-300"
+                  : "text-slate-600 hover:bg-slate-100 hover:text-emerald-600"
+              }`}
+              title="Refunds"
+            >
+              <DollarSign size={18} className="lg:w-5 lg:h-5" />
+            </button>
+          )}
 
           {/* Notification Bell */}
           <div className="relative" ref={notificationRef}>
@@ -446,26 +523,27 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           {/* Jobs Panel */}
           <div
             key="jobs"
-            className={`rounded-md shadow-sm border overflow-hidden flex flex-col ${
+            className={`rounded-lg shadow-sm border overflow-hidden flex flex-col ${
               isDark
-                ? "bg-slate-800 border-slate-700"
+                ? "bg-slate-800 border-slate-700/80"
                 : "bg-white border-slate-200"
             }`}
           >
             <div
-              className={`panel-drag-handle flex items-center gap-1.5 px-2 py-1 border-b cursor-move select-none ${
+              className={`panel-drag-handle flex items-center gap-1.5 px-2.5 py-1 border-b cursor-move select-none ${
                 isDark
-                  ? "bg-slate-700/50 border-slate-600"
-                  : "bg-slate-100 border-slate-200"
+                  ? "bg-gradient-to-r from-slate-700/80 to-slate-700/40 border-slate-600"
+                  : "bg-gradient-to-r from-blue-50/80 to-slate-50 border-slate-200"
               }`}
             >
               <GripHorizontal
-                size={12}
-                className={isDark ? "text-slate-500" : "text-slate-400"}
+                size={10}
+                className={isDark ? "text-slate-600" : "text-slate-300"}
               />
+              <Car size={12} className={isDark ? "text-blue-400" : "text-blue-500"} />
               <span
-                className={`text-[10px] sm:text-xs font-medium ${
-                  isDark ? "text-slate-300" : "text-slate-600"
+                className={`text-[10px] sm:text-xs font-semibold tracking-wide ${
+                  isDark ? "text-slate-200" : "text-slate-700"
                 }`}
               >
                 Jobs
@@ -477,26 +555,27 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           {/* Map Panel */}
           <div
             key="map"
-            className={`rounded-md shadow-sm border overflow-hidden flex flex-col ${
+            className={`rounded-lg shadow-sm border overflow-hidden flex flex-col ${
               isDark
-                ? "bg-slate-800 border-slate-700"
+                ? "bg-slate-800 border-slate-700/80"
                 : "bg-white border-slate-200"
             }`}
           >
             <div
-              className={`panel-drag-handle flex items-center gap-1.5 px-2 py-1 border-b cursor-move select-none ${
+              className={`panel-drag-handle flex items-center gap-1.5 px-2.5 py-1 border-b cursor-move select-none ${
                 isDark
-                  ? "bg-slate-700/50 border-slate-600"
-                  : "bg-slate-100 border-slate-200"
+                  ? "bg-gradient-to-r from-slate-700/80 to-slate-700/40 border-slate-600"
+                  : "bg-gradient-to-r from-emerald-50/80 to-slate-50 border-slate-200"
               }`}
             >
               <GripHorizontal
-                size={12}
-                className={isDark ? "text-slate-500" : "text-slate-400"}
+                size={10}
+                className={isDark ? "text-slate-600" : "text-slate-300"}
               />
+              <MapIcon size={12} className={isDark ? "text-emerald-400" : "text-emerald-500"} />
               <span
-                className={`text-[10px] sm:text-xs font-medium ${
-                  isDark ? "text-slate-300" : "text-slate-600"
+                className={`text-[10px] sm:text-xs font-semibold tracking-wide ${
+                  isDark ? "text-slate-200" : "text-slate-700"
                 }`}
               >
                 Map
@@ -508,26 +587,27 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           {/* Drivers Panel */}
           <div
             key="drivers"
-            className={`rounded-md shadow-sm border overflow-hidden flex flex-col ${
+            className={`rounded-lg shadow-sm border overflow-hidden flex flex-col ${
               isDark
-                ? "bg-slate-800 border-slate-700"
+                ? "bg-slate-800 border-slate-700/80"
                 : "bg-white border-slate-200"
             }`}
           >
             <div
-              className={`panel-drag-handle flex items-center gap-1.5 px-2 py-1 border-b cursor-move select-none ${
+              className={`panel-drag-handle flex items-center gap-1.5 px-2.5 py-1 border-b cursor-move select-none ${
                 isDark
-                  ? "bg-slate-700/50 border-slate-600"
-                  : "bg-slate-100 border-slate-200"
+                  ? "bg-gradient-to-r from-slate-700/80 to-slate-700/40 border-slate-600"
+                  : "bg-gradient-to-r from-purple-50/80 to-slate-50 border-slate-200"
               }`}
             >
               <GripHorizontal
-                size={12}
-                className={isDark ? "text-slate-500" : "text-slate-400"}
+                size={10}
+                className={isDark ? "text-slate-600" : "text-slate-300"}
               />
+              <Users size={12} className={isDark ? "text-purple-400" : "text-purple-500"} />
               <span
-                className={`text-[10px] sm:text-xs font-medium ${
-                  isDark ? "text-slate-300" : "text-slate-600"
+                className={`text-[10px] sm:text-xs font-semibold tracking-wide ${
+                  isDark ? "text-slate-200" : "text-slate-700"
                 }`}
               >
                 Drivers
@@ -539,26 +619,27 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           {/* Zones Panel */}
           <div
             key="zones"
-            className={`rounded-md shadow-sm border overflow-hidden flex flex-col ${
+            className={`rounded-lg shadow-sm border overflow-hidden flex flex-col ${
               isDark
-                ? "bg-slate-800 border-slate-700"
+                ? "bg-slate-800 border-slate-700/80"
                 : "bg-white border-slate-200"
             }`}
           >
             <div
-              className={`panel-drag-handle flex items-center gap-1.5 px-2 py-1 border-b cursor-move select-none ${
+              className={`panel-drag-handle flex items-center gap-1.5 px-2.5 py-1 border-b cursor-move select-none ${
                 isDark
-                  ? "bg-slate-700/50 border-slate-600"
-                  : "bg-slate-100 border-slate-200"
+                  ? "bg-gradient-to-r from-slate-700/80 to-slate-700/40 border-slate-600"
+                  : "bg-gradient-to-r from-amber-50/80 to-slate-50 border-slate-200"
               }`}
             >
               <GripHorizontal
-                size={12}
-                className={isDark ? "text-slate-500" : "text-slate-400"}
+                size={10}
+                className={isDark ? "text-slate-600" : "text-slate-300"}
               />
+              <Layers size={12} className={isDark ? "text-amber-400" : "text-amber-500"} />
               <span
-                className={`text-[10px] sm:text-xs font-medium ${
-                  isDark ? "text-gray-300" : "text-slate-600"
+                className={`text-[10px] sm:text-xs font-semibold tracking-wide ${
+                  isDark ? "text-slate-200" : "text-slate-700"
                 }`}
               >
                 Zones
@@ -578,7 +659,7 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
               top: position.y,
               zIndex: 1100,
             }}
-            className={`w-[340px] lg:w-[400px] max-h-[80vh] lg:max-h-[85vh] rounded-xl shadow-2xl border flex flex-col overflow-hidden ${
+            className={`w-[420px] lg:w-[500px] max-h-[85vh] lg:max-h-[90vh] rounded-xl shadow-2xl border flex flex-col overflow-hidden ${
               isDark
                 ? "bg-gray-800 border-gray-700"
                 : "bg-white border-slate-200"
@@ -598,7 +679,7 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
                 />
                 <div>
                   <h2 className="text-sm lg:text-base font-semibold text-white">
-                    Create New Job
+                    {isEditMode ? 'Update Job' : 'Create New Job'}
                   </h2>
                 </div>
               </div>
@@ -618,6 +699,12 @@ const ResizableDispatchLayout: React.FC<ResizableDispatchLayoutProps> = ({
           </div>
         )}
       </main>
+
+      {/* Wave 2D — global modals */}
+      <EmergencyPanel open={showEmergencyPanel} onClose={() => setShowEmergencyPanel(false)} />
+      {canSeeRefunds && (
+        <RefundListView open={showRefundListView} onClose={() => setShowRefundListView(false)} />
+      )}
     </div>
   );
 };

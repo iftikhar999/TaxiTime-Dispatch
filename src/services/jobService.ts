@@ -127,6 +127,11 @@ export async function createJob(
         currency: payload.currency,
       },
 
+      // Intermediate stops/waypoints
+      stops: payload.stops && payload.stops.length > 0
+        ? payload.stops.map((s, i) => ({ ...s, order: s.order ?? i + 1 }))
+        : undefined,
+
       // Payment (default to cash if not specified)
       paymentMethod: payload.paymentMethod || "cash",
       paymentIntentId: payload.paymentIntentId,
@@ -169,21 +174,54 @@ export async function assignDriverToJob(
 
 /**
  * Cancel a job
+ * For PAID jobs, pass refundAction to handle payment refund
  */
+export interface CancelJobPayload {
+  reason?: string;
+  refundAction?: 'STRIPE_REFUND' | 'WALLET_CREDIT' | 'MANUAL_REFUND';
+  manualRefundAcknowledged?: boolean;
+}
+
+export interface PaidJobCancelInfo {
+  totalPaid: number;
+  currency: string;
+  paymentCount: number;
+  hasStripePayments: boolean;
+  payments: Array<{
+    id: string;
+    amount: number;
+    method: string;
+    stripePaymentIntentId?: string;
+    createdAt: string;
+  }>;
+}
+
 export async function cancelJob(
   jobId: string,
-  reason?: string
+  reasonOrPayload?: string | CancelJobPayload
 ): Promise<JobResponse> {
   try {
+    const payload = typeof reasonOrPayload === 'string'
+      ? { reason: reasonOrPayload }
+      : reasonOrPayload || {};
+
     const response = await api.post<JobResponse>(
       `/api/dispatch/jobs/${jobId}/cancel`,
-      {
-        reason,
-      }
+      payload
     );
 
     return response;
-  } catch (error) {
+  } catch (error: any) {
+    // Check if this is a PAID_JOB_REQUIRES_REFUND response
+    if (error?.response?.status === 409 && error?.response?.data?.code === 'PAID_JOB_REQUIRES_REFUND') {
+      const paidError = new Error('PAID_JOB_REQUIRES_REFUND') as Error & {
+        code: string;
+        paidJobInfo: PaidJobCancelInfo;
+      };
+      paidError.code = 'PAID_JOB_REQUIRES_REFUND';
+      paidError.paidJobInfo = error.response.data.data;
+      throw paidError;
+    }
     console.error("Cancel job error:", error);
     throw error;
   }
@@ -234,6 +272,13 @@ export interface UpdateJobPayload {
   // Driver assignment
   driverAssignment?: "manual" | "auto" | "unassigned";
   driverId?: string;
+  // Intermediate stops
+  stops?: Array<{
+    address: string;
+    latitude?: number;
+    longitude?: number;
+    order?: number;
+  }>;
 }
 
 export async function updateJob(

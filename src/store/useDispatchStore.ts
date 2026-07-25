@@ -6,6 +6,8 @@ export type JobStatus =
   | "PENDING"
   | "OFFERED"
   | "ASSIGNED"
+  | "ON_THE_WAY"
+  | "ARRIVED"
   | "REJECTED"
   | "NOSHOW"
   | "RECALLED"
@@ -159,6 +161,36 @@ export interface DispatchJob {
   lastUpdateAt?: string;
   lastUpdateSource?: string;
   needsHydration?: boolean;
+  // Payment tracking
+  paymentStatus?: string; // 'PAID', 'PENDING', null
+  paymentIntentId?: string;
+  stripePaymentMethodId?: string; // Saved card (pm_xxx) for reuse
+  chargedAmount?: number;
+  totalCharged?: number;
+  paidAt?: string;
+  transactions?: Array<{
+    id: string;
+    amount: number | null;
+    currency?: string;
+    status?: string;
+    method?: string;
+    transactionId?: string;
+    createdAt?: string;
+    description?: string;
+  }>;
+  extraCharges?: Array<{
+    amount: number;
+    currency: string;
+    paymentIntentId: string;
+    description: string;
+    createdAt: string;
+    status: string;
+    paidAt?: string;
+  }>;
+  // Offer countdown — populated while the job is in OFFERED status so the
+  // JobBoard can show the same N-second timer that the driver sees.
+  offerExpiresAt?: string;
+  offeredDriverId?: string;
 }
 
 export interface DispatchDriver {
@@ -176,7 +208,7 @@ export interface DispatchDriver {
   };
   vehicleType?: string; // Added vehicle type for icon mapping
   phone?: string;
-  status: "AVAILABLE" | "BUSY" | "ROGER" | "AWAY" | "OFFLINE";
+  status: "AVAILABLE" | "BUSY" | "ROGER" | "ON_THE_WAY" | "ARRIVED" | "AWAY" | "OFFLINE";
   zoneId?: string;
   zoneName?: string | null;
   queuePosition?: number | null;
@@ -242,7 +274,17 @@ export interface JobDraftLocation {
 export interface JobDraft {
   pickup?: JobDraftLocation;
   dropoff?: JobDraftLocation;
+  stops?: JobDraftLocation[];
   routePath?: Array<{ lat: number; lng: number }>;
+  // Alternative routes from OSRM — map sets these, form reads selectedRouteDistance
+  alternativeRoutes?: Array<{
+    path: Array<{ lat: number; lng: number }>;
+    distance: number; // meters
+    duration: number; // seconds
+  }>;
+  selectedRouteIndex?: number;
+  selectedRouteDistance?: number; // meters — used by fare calc
+  selectedRouteDuration?: number; // seconds
 }
 
 type SessionDescriptionInit = {
@@ -265,6 +307,7 @@ interface DispatchState {
   zones: DispatchZone[];
   selectedJobId: string | null;
   selectedStatus: JobStatus;
+  selectedServiceType?: "TAXI" | "DELIVERY" | "COURIER" | null;
   jobCounters: JobCounters;
   tariffs: any[];
   vehicleTypes: any[];
@@ -278,11 +321,40 @@ interface DispatchState {
   loading: boolean;
   error: string | null;
   jobDraft: JobDraft | null;
+  // When the dispatcher clicks "Pick on map" next to a Pickup / Dropoff /
+  // Stop field in the Create-Job composer we flip this flag and the next
+  // map click is interpreted as "set this location". Cleared on selection.
+  mapPickMode:
+    | { target: 'pickup' }
+    | { target: 'dropoff' }
+    | { target: 'stop'; index: number }
+    | null;
+  // One-shot delivery from the map to the composer. Composer reads it,
+  // copies the address + coords into its form state, then clears.
+  mapPickResult:
+    | {
+        target: 'pickup' | 'dropoff' | 'stop';
+        stopIndex?: number;
+        address: string;
+        latitude: number;
+        longitude: number;
+      }
+    | null;
   selectionTimerId: NodeJS.Timeout | null;
   focusedDriverId: string | null;
   focusedZoneId: string | null;
   mapFocusCoords: { lat: number; lng: number; zoom?: number } | null;
+  // True while the Create-Job composer is mounted. The map uses this to
+  // switch its auto-fit target from "all zones" (rarely useful at that moment)
+  // to "all available drivers" so the dispatcher can see where the fleet is
+  // while placing pickup/dropoff pins.
+  jobComposerOpen: boolean;
   hoveredJobId: string | null;
+  // Epoch-ms timestamp until which `setHoveredJobId(non-null)` is ignored.
+  // Set briefly after a composer submit/close so the post-close layout
+  // shift can't repaint pickup pins via a phantom mouse-move on the
+  // newly-rendered eye icon.
+  hoverSuppressedUntil: number;
   hoveredDriverId: string | null;
   hoveredZoneId: string | null;
   videoSessions: Record<string, DispatchVideoSession>;
@@ -301,11 +373,13 @@ interface DispatchState {
   setError: (message: string | null) => void;
   selectJob: (id: string | null) => void;
   setSelectedStatus: (status: JobStatus) => void;
+  setSelectedServiceType: (serviceType: "TAXI" | "DELIVERY" | "COURIER" | null) => void;
   focusDriver: (driverId: string | null) => void;
   focusZone: (zoneId: string | null) => void;
   focusMapCoords: (coords: { lat: number; lng: number; zoom?: number } | null) => void;
   focusAllZones: () => void;
   setHoveredJobId: (jobId: string | null) => void;
+  setHoverSuppressedUntil: (epochMs: number) => void;
   setHoveredDriverId: (driverId: string | null) => void;
   setHoveredZoneId: (zoneId: string | null) => void;
   upsertDriver: (driver: DispatchDriver) => void;
@@ -330,11 +404,20 @@ interface DispatchState {
   unassignJob: (jobId: string, reason?: string) => Promise<void>;
   editJob: (jobId: string, payload: any) => Promise<void>;
   updateJobDraft: (draft: Partial<JobDraft>) => void;
+  setMapPickMode: (mode: DispatchState['mapPickMode']) => void;
+  setMapPickResult: (result: DispatchState['mapPickResult']) => void;
+  setJobComposerOpen: (open: boolean) => void;
   clearJobDraft: () => void;
   upsertVideoSession: (session: DispatchVideoSession) => void;
   removeVideoSession: (jobId: string) => void;
   updateVideoViewerCount: (jobId: string, viewerCount: number) => void;
 }
+
+const loadServiceType = () => {
+  if (typeof localStorage === "undefined") return "TAXI";
+  const stored = localStorage.getItem("dispatch_service_type");
+  return (stored as any) || "TAXI";
+};
 
 export const useDispatchStore = create<DispatchState>((set, get) => ({
   jobs: [],
@@ -343,6 +426,7 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   selectedJobId: null,
   selectionTimerId: null,
   selectedStatus: "UNASSIGNED",
+  selectedServiceType: loadServiceType(),
   jobCounters: {
     unassigned: 0,
     offered: 0,
@@ -361,10 +445,14 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   loading: false,
   error: null,
   jobDraft: null,
+  mapPickMode: null,
+  mapPickResult: null,
+  jobComposerOpen: false,
   focusedDriverId: null,
   focusedZoneId: null,
   mapFocusCoords: null,
   hoveredJobId: null,
+  hoverSuppressedUntil: 0,
   hoveredDriverId: null,
   hoveredZoneId: null,
   videoSessions: {},
@@ -426,6 +514,16 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
     console.log('✅ selectedJobId set:', selectedJobId);
   },
   setSelectedStatus: (selectedStatus) => set({ selectedStatus }),
+  setSelectedServiceType: (selectedServiceType) => {
+    if (typeof localStorage !== "undefined") {
+      if (selectedServiceType) {
+        localStorage.setItem("dispatch_service_type", selectedServiceType);
+      } else {
+        localStorage.removeItem("dispatch_service_type");
+      }
+    }
+    set({ selectedServiceType });
+  },
   focusDriver: (focusedDriverId) => {
     console.log('🏪 Store focusDriver called:', focusedDriverId);
     // When focusing a driver, also set map coordinates
@@ -482,7 +580,26 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
   },
   focusMapCoords: (mapFocusCoords) => set({ mapFocusCoords }),
   focusAllZones: () => set({ focusedZoneId: null, focusedDriverId: null, mapFocusCoords: null }),
-  setHoveredJobId: (hoveredJobId) => set({ hoveredJobId }),
+  // Brief suppression window applied right after a job create/edit submit
+  // (or panel close). For ~700ms after that point, setHoveredJobId is a
+  // no-op for non-null values. This prevents the phantom layout-shift
+  // cascade — closing the composer reflows the JobBoard rows, the cursor
+  // ends up over an eye icon, onMouseMove fires, and the just-cleared
+  // pickup pin would otherwise repaint via the new hoveredJobId. The
+  // previous rAF "stomp" only fired twice and could be defeated by
+  // continued cursor motion; an explicit time window is bullet-proof.
+  setHoverSuppressedUntil: (epochMs) => set({ hoverSuppressedUntil: epochMs }),
+  setHoveredJobId: (hoveredJobId) => {
+    const { hoverSuppressedUntil } = get();
+    if (
+      hoveredJobId !== null &&
+      hoverSuppressedUntil &&
+      Date.now() < hoverSuppressedUntil
+    ) {
+      return;
+    }
+    set({ hoveredJobId });
+  },
   setHoveredDriverId: (hoveredDriverId) => set({ hoveredDriverId }),
   setHoveredZoneId: (hoveredZoneId) => set({ hoveredZoneId }),
   upsertDriver: (driver) =>
@@ -612,9 +729,15 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
       if (draft.dropoff !== undefined) {
         nextDraft.dropoff = draft.dropoff;
       }
+      if (draft.stops !== undefined) {
+        nextDraft.stops = draft.stops;
+      }
       return { jobDraft: nextDraft };
     }),
-  clearJobDraft: () => set({ jobDraft: null }),
+  clearJobDraft: () => set({ jobDraft: null, mapPickMode: null, mapPickResult: null }),
+  setMapPickMode: (mode) => set({ mapPickMode: mode }),
+  setMapPickResult: (result) => set({ mapPickResult: result }),
+  setJobComposerOpen: (open) => set({ jobComposerOpen: open }),
   upsertVideoSession: (session) =>
     set((state) => ({
       videoSessions: {
@@ -707,6 +830,15 @@ export const useDispatchStore = create<DispatchState>((set, get) => ({
         // Driver assignment
         driverAssignment: payload.driverAssignment,
         driverId: payload.driverId,
+        // Intermediate stops
+        stops: payload.stops && Array.isArray(payload.stops) && payload.stops.length > 0
+          ? payload.stops.map((s: any, i: number) => ({
+              address: s.address,
+              latitude: s.latitude,
+              longitude: s.longitude,
+              order: s.order ?? i + 1,
+            }))
+          : [],
       };
       
       // Add pickup if coordinates are provided

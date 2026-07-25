@@ -71,6 +71,9 @@ export function SocketProvider({ children }: SocketProviderProps) {
       const nextSocket = connectDispatchSocket({
         userId: state.user.id,
         companyId: state.user.companyId || undefined,
+        // Pull the role from the auth store; fall back to DISPATCHER only
+        // when the user object is somehow missing a role (should not happen).
+        role: state.user.role || "DISPATCHER",
       });
       setSocket(nextSocket);
 
@@ -92,6 +95,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
         const nextSocket = connectDispatchSocket({
           userId: state.user.id,
           companyId: state.user.companyId || undefined,
+          role: state.user.role || "DISPATCHER",
         });
         setSocket(nextSocket);
 
@@ -103,8 +107,41 @@ export function SocketProvider({ children }: SocketProviderProps) {
       }
     }
 
+    // Surface socket auth failures to the user — see socket.ts which emits
+    // this CustomEvent on an `auth:error` / unauthorized `error` payload.
+    const handleSocketAuthError = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      console.error("[SocketProvider] Socket auth error", detail);
+      setConnected(false);
+      // Dynamic import to avoid bringing react-hot-toast into this module's
+      // initial eval if it's not already loaded.
+      import("react-hot-toast")
+        .then(({ default: toast }) => {
+          toast.error(
+            detail?.message
+              ? `Realtime disconnected: ${detail.message}`
+              : "Realtime disconnected (auth error). Please sign in again."
+          );
+        })
+        .catch(() => {
+          // toast unavailable — already logged above.
+        });
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener(
+        "dispatch:socket:auth-error",
+        handleSocketAuthError
+      );
+    }
+
     return () => {
       unsubscribe();
+      if (typeof window !== "undefined") {
+        window.removeEventListener(
+          "dispatch:socket:auth-error",
+          handleSocketAuthError
+        );
+      }
       disconnectDispatchSocket();
     };
   }, []);

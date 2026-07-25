@@ -12,6 +12,7 @@ interface GridDispatchLayoutProps {
   map: React.ReactNode;
   jobCreation: React.ReactNode;
   showJobCreation: boolean;
+  isEditMode?: boolean;
   onCloseJobCreation: () => void;
 }
 
@@ -25,6 +26,7 @@ const GridDispatchLayout: React.FC<GridDispatchLayoutProps> = ({
   map,
   jobCreation,
   showJobCreation,
+  isEditMode = false,
   onCloseJobCreation,
 }) => {
   // Notification state from store
@@ -284,7 +286,7 @@ const GridDispatchLayout: React.FC<GridDispatchLayoutProps> = ({
                 <GripHorizontal size={14} className="text-blue-200 lg:w-4 lg:h-4" />
                 <div>
                   <h2 className="text-sm lg:text-base font-semibold text-white">
-                    Create New Job
+                    {isEditMode ? 'Update Job' : 'Create New Job'}
                   </h2>
                 </div>
               </div>
